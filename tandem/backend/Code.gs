@@ -13,7 +13,7 @@ var APP = 'Tandem';
 var SCHEMA = {
   Users: ['id', 'name', 'email', 'color', 'salt', 'passHash', 'createdAt'],
   Expenses: ['id', 'type', 'date', 'amount', 'description', 'category', 'paidBy', 'mode', 'cardId',
-    'splitType', 'share1', 'share2', 'notes', 'recurringId', 'settledBy', 'createdBy', 'createdAt', 'updatedAt', 'deleted'],
+    'splitType', 'splitInfo', 'share1', 'share2', 'friendsShare', 'friends', 'platform', 'device', 'cats', 'notes', 'recurringId', 'settledBy', 'createdBy', 'createdAt', 'updatedAt', 'deleted'],
   Cards: ['id', 'owner', 'name', 'last4', 'statementDay', 'dueDay', 'limit', 'deleted', 'updatedAt'],
   Recurring: ['id', 'description', 'amount', 'category', 'paidBy', 'mode', 'cardId', 'splitType',
     'payerPct', 'dayOfMonth', 'active', 'deleted', 'updatedAt'],
@@ -21,7 +21,7 @@ var SCHEMA = {
   Settings: ['id', 'value', 'updatedAt']
 };
 var WRITABLE = { Expenses: 1, Cards: 1, Recurring: 1, BillPayments: 1, Settings: 1 };
-var NUMERIC = { amount: '0.00', share1: '0.00', share2: '0.00', createdAt: '0', updatedAt: '0' };
+var NUMERIC = { amount: '0.00', share1: '0.00', share2: '0.00', friendsShare: '0.00', createdAt: '0', updatedAt: '0' };
 var USER_COLORS = ['#2563eb', '#c026d3'];
 
 /* ------------------------------------------------------------------ setup */
@@ -390,7 +390,7 @@ function monthlySummary_() {
       if (lent) { open += lent; openN++; }
     }
     if (String(e.date).slice(0, 7) !== ym) return;
-    total += amt; share.u1 += s1; share.u2 += s2;
+    total += amt - (Number(e.friendsShare) || 0); share.u1 += s1; share.u2 += s2;
     paid[e.paidBy] = (paid[e.paidBy] || 0) + amt;
     cats[e.category] = (cats[e.category] || 0) + amt;
   });

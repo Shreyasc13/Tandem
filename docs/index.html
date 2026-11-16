@@ -112,13 +112,19 @@ nav.bottom .fab svg{width:26px;height:26px;stroke-width:2.4}
 #toast.act.show{pointer-events:auto}#toast button{margin-left:12px;color:inherit;font-weight:800;text-decoration:underline}
 .hscroll{display:flex;gap:8px;overflow-x:auto;padding:2px 0 12px;scrollbar-width:none}.hscroll::-webkit-scrollbar{display:none}.hscroll .chip{background:var(--surface);box-shadow:var(--shadow)}
 .plus{width:40px;height:40px;border-radius:50%;background:var(--surface2);font-size:22px;font-weight:600;align-self:center;flex:none}
+.crow{display:flex;align-items:center;gap:10px;width:100%;padding:12px 14px;border-radius:12px;background:var(--surface);margin-bottom:8px;text-align:left}
+.crow span{font-size:12px;font-weight:650;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;flex:none}
+.crow b{flex:1;text-align:right;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}.crow i{font-style:normal;color:var(--muted)}
+.flabel.shut{cursor:pointer;background:none;text-align:left}
+.chip.ghost{background:none;border:1.5px dashed var(--line);color:var(--muted)}
+.mrow{display:grid;grid-template-columns:1fr 110px 34px;gap:8px;margin-bottom:8px;align-items:center}.mrow .in{padding:10px 10px}
 .x{width:34px;height:34px;border-radius:50%;background:var(--surface2);font-size:18px}
 #toast{position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:99px;font-size:14px;font-weight:600;z-index:40;opacity:0;pointer-events:none;transition:opacity .2s;white-space:nowrap;max-width:90vw;overflow:hidden;text-overflow:ellipsis}
 #toast.show{opacity:1}
 .monthnav{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
 .monthnav b{font-size:17px;font-weight:720}
 .monthnav button{width:38px;height:38px;border-radius:50%;background:var(--surface);font-size:18px}
-.filters{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:8px 0 4px}
+.filters{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0 4px}
 .filters select{padding:9px 8px;font-size:13.5px}
 .donutwrap{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
 .donut{width:150px;height:150px;flex:none;position:relative;margin:0 auto}
@@ -233,6 +239,8 @@ const nf0 = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
 
 const MODES = [['upi', 'UPI', '📱'], ['credit_card', 'Credit card', '💳'], ['debit_card', 'Debit card', '🏧'], ['cash', 'Cash', '💵'], ['netbanking', 'Net banking', '🏦'], ['wallet', 'Wallet', '👛']];
 const modeLabel = id => (MODES.find(m => m[0] === id) || [0, id || '—'])[1];
+const DEF_PLATS = ['Amazon', 'Flipkart', 'Swiggy', 'Zomato', 'Zepto', 'Blinkit', 'Instamart', 'BigBasket', 'Myntra', 'Uber', 'Ola'];
+const DEVICES = { primary: 'Primary phone', office: 'Office phone' };
 const DEF_CATS = [
   ['groceries', 'Groceries', '🛒'], ['dining', 'Food & dining', '🍽️'], ['rent', 'Rent', '🏠'], ['utilities', 'Bills & utilities', '💡'],
   ['transport', 'Transport', '🚕'], ['fuel', 'Fuel', '⛽'], ['shopping', 'Shopping', '🛍️'], ['health', 'Health', '💊'],
@@ -250,7 +258,7 @@ let state = Object.assign(blank(), store.get(K.state, {}));
 let queue = store.get(K.queue, []);
 let prefs = store.get(K.prefs, {});
 let meta = store.get(K.meta, {});
-let ui = { view: 'home', month: monthOf(today()), basis: 'all', filter: { q: '', who: '', cat: '', mode: '' } };
+let ui = { view: 'home', month: monthOf(today()), basis: 'all', filter: { q: '', who: '', cat: '', mode: '', plat: '' } };
 let syncing = false, syncAgain = false, syncErr = null, syncTimer = null, lastSync = 0, installEvt = null;
 const TABLES = { Expenses: 'expenses', Cards: 'cards', Recurring: 'recurring', BillPayments: 'billPayments' };
 
@@ -264,7 +272,8 @@ const S = {
   get split() { const v = Number(state.settings.defaultSplit); return state.settings.defaultSplit != null && isFinite(v) ? v : 50; },
   get cur() { return state.settings.currency || '₹'; },
   get remind() { return Number(state.settings.reminderDays) || 3; },
-  get budgets() { return state.settings.budgets || {}; }
+  get budgets() { return state.settings.budgets || {}; },
+  get platforms() { return state.settings.platforms || DEF_PLATS; }
 };
 const money = v => { const a = Math.abs(round2(v)); return (v < 0 ? '−' : '') + S.cur + (Number.isInteger(a) ? nf.format(a) : a.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })); };
 const money0 = v => (v < 0 ? '−' : '') + S.cur + nf0.format(Math.abs(Math.round(v)));
@@ -284,8 +293,23 @@ const shareOf = (e, id) => (id === 'u1' ? e.share1 : e.share2);
 const live = () => state.expenses.filter(e => !e.deleted);
 const spends = () => live().filter(e => e.type !== 'settlement');
 const liveCards = () => state.cards.filter(c => !c.deleted);
+/* friends: a third bucket on an expense. Each friend's part is owed to whoever paid. */
+const friendsAll = () => state.settings.friends || [];
+const friendName = id => (friendsAll().find(x => x.id === id) || {}).name || 'Friend';
+const spendOf = e => round2(e.amount - (e.friendsShare || 0));       // what the two of you actually spent
+function friendDues() { const out = []; for (const e of spends()) for (const p of e.friends || []) if (!p.settled && p.amount > 0) out.push({ id: p.id, e, amount: p.amount }); return out; }
+const share = async (text, done) => { try { if (navigator.share) await navigator.share({ text }); else { await navigator.clipboard.writeText(text); toast(done || 'Copied'); } } catch { try { await navigator.clipboard.writeText(text); toast(done || 'Copied'); } catch {} } };
 
 /* ───────────────────────── normalise server data ───────────────────────── */
+function parseObj(v) { if (v && typeof v === 'object') return v; try { const o = JSON.parse(v || '{}'); return o && typeof o === 'object' ? o : {}; } catch { return {}; } }
+function parseCats(v) {
+  let a = v; if (typeof v === 'string') { try { a = JSON.parse(v || '[]'); } catch { a = []; } }
+  return Array.isArray(a) ? a.filter(c => c && c.id).map(c => ({ id: String(c.id), amount: Number(c.amount) || 0 })) : [];
+}
+function parseFriends(v) {
+  let a = v; if (typeof v === 'string') { try { a = JSON.parse(v || '[]'); } catch { a = []; } }
+  return Array.isArray(a) ? a.filter(p => p && p.id).map(p => ({ id: String(p.id), amount: Number(p.amount) || 0, settled: p.settled ? String(p.settled) : '' })) : [];
+}
 function norm(d) {
   const b = v => v === true || String(v).toLowerCase() === 'true';
   const n = v => { const x = Number(v); return isFinite(x) ? x : 0; };
@@ -297,7 +321,7 @@ function norm(d) {
     expenses: (d.expenses || []).map(e => ({
       id: s(e.id), type: s(e.type) || 'expense', date: s(e.date).slice(0, 10), amount: n(e.amount), description: s(e.description),
       category: s(e.category), paidBy: s(e.paidBy), mode: s(e.mode), cardId: s(e.cardId), splitType: s(e.splitType),
-      share1: n(e.share1), share2: n(e.share2), notes: s(e.notes), recurringId: s(e.recurringId), settledBy: s(e.settledBy), createdBy: s(e.createdBy),
+      share1: n(e.share1), share2: n(e.share2), notes: s(e.notes), platform: s(e.platform), device: s(e.device), cats: parseCats(e.cats), splitInfo: parseObj(e.splitInfo), recurringId: s(e.recurringId), settledBy: s(e.settledBy), friendsShare: n(e.friendsShare), friends: parseFriends(e.friends), createdBy: s(e.createdBy),
       createdAt: n(e.createdAt), updatedAt: n(e.updatedAt), deleted: b(e.deleted)
     })).filter(e => /^\d{4}-\d{2}-\d{2}$/.test(e.date)),
     cards: (d.cards || []).map(c => ({ id: s(c.id), owner: s(c.owner), name: s(c.name), last4: s(c.last4), statementDay: n(c.statementDay) || 1, dueDay: n(c.dueDay) || 1, limit: n(c.limit), deleted: b(c.deleted) })),
@@ -388,14 +412,16 @@ const openItems = () => spends().filter(e => !e.settledBy && lentOf(e) !== 0);
 function balance() { return round2(openItems().reduce((s, e) => s + lentOf(e), 0)); }
 function stats(ym, basis = 'all') {
   const me = meId(), list = spends().filter(e => monthOf(e.date) === ym);
-  const val = e => (basis === 'mine' ? shareOf(e, me) : e.amount);
-  const r = { list, total: 0, mine: 0, theirs: 0, paidMe: 0, paidOther: 0, sum: 0, byCat: {}, byDay: {}, byMode: {} };
+  const val = e => (basis === 'mine' ? shareOf(e, me) : spendOf(e));
+  const r = { list, total: 0, mine: 0, theirs: 0, paidMe: 0, paidOther: 0, sum: 0, byCat: {}, byDay: {}, byMode: {}, byPlat: {} };
   for (const e of list) {
-    r.total += e.amount; r.mine += shareOf(e, me); r.theirs += shareOf(e, otherId());
+    r.total += spendOf(e); r.mine += shareOf(e, me); r.theirs += shareOf(e, otherId());
     if (e.paidBy === me) r.paidMe += e.amount; else r.paidOther += e.amount;
     const v = val(e); if (!v) continue;
     r.sum += v;
-    r.byCat[e.category] = (r.byCat[e.category] || 0) + v;
+    if ((e.cats || []).length > 1 && e.amount) e.cats.forEach(c => (r.byCat[c.id] = (r.byCat[c.id] || 0) + v * c.amount / e.amount));   // mixed order
+    else r.byCat[e.category] = (r.byCat[e.category] || 0) + v;
+    if (e.platform) r.byPlat[e.platform] = (r.byPlat[e.platform] || 0) + v;
     r.byDay[e.date] = (r.byDay[e.date] || 0) + v;
     r.byMode[e.mode] = (r.byMode[e.mode] || 0) + v;
   }
@@ -473,8 +499,8 @@ function openSheet(title, html) {
 }
 function closeSheet() { $('#sheet').innerHTML = ''; }
 const chip = (on, attrs, label) => `<button type="button" class="chip ${on ? 'on' : ''}" ${attrs}>${label}</button>`;
-const TITLES = { home: 'Tandem', expenses: 'Expenses', insights: 'Insights', more: 'More', cards: 'Credit cards', recurring: 'Recurring', budgets: 'Budgets', categories: 'Categories', settings: 'Settings' };
-const SUB = ['cards', 'recurring', 'budgets', 'categories', 'settings'];
+const TITLES = { home: 'Tandem', expenses: 'Expenses', insights: 'Insights', more: 'More', cards: 'Credit cards', recurring: 'Recurring', budgets: 'Budgets', categories: 'Categories', settings: 'Settings', friends: 'Friends' };
+const SUB = ['cards', 'recurring', 'budgets', 'categories', 'settings', 'friends'];
 function go(v) { if (location.hash !== '#/' + v) location.hash = '#/' + v; else { ui.view = v; render(); } }
 
 function render(soft) {
@@ -496,11 +522,11 @@ function expRow(e) {
   if (e.type === 'settlement') {
     return `<button class="row" data-act="editSettle" data-id="${esc(e.id)}"><span class="ico">🤝</span><span class="rmain"><b>${esc(you(e.paidBy))} paid ${esc(youL(other(e.paidBy)))}</b><small>Settlement · ${(n => n ? n + ' expense' + (n > 1 ? 's' : '') + ' · ' : '')(state.expenses.filter(x => x.settledBy === e.id).length)}${esc(modeLabel(e.mode))}</small></span><span class="ramt"><b>${money(e.amount)}</b></span></button>`;
   }
-  const c = cat(e.category), lent = e.paidBy === me ? shareOf(e, otherId()) : -shareOf(e, me);
+  const c = cat(e.category), mixed = (e.cats || []).length > 1, lent = e.paidBy === me ? shareOf(e, otherId()) : -shareOf(e, me);
   const tag = lent && e.settledBy ? '<small class="muted">settled ✓</small>' : lent > 0 ? `<small class="pos">you lent ${money(lent)}</small>` : lent < 0 ? `<small class="neg">you owe ${money(-lent)}</small>` : `<small class="muted">${e.paidBy === me ? 'just you' : 'just ' + esc(uname(e.paidBy))}</small>`;
   const card = e.cardId && state.cards.find(k => k.id === e.cardId);
   return `<button class="row" data-act="edit" data-id="${esc(e.id)}"><span class="ico">${esc(c.emoji)}</span>
-    <span class="rmain"><b>${esc(e.description || c.name)}</b><small>${esc(you(e.paidBy))} · ${esc(card ? card.name : modeLabel(e.mode))} · ${esc(c.name)}</small></span>
+    <span class="rmain"><b>${esc(e.description || c.name)}</b><small>${esc(you(e.paidBy))} · ${esc(card ? card.name : modeLabel(e.mode))} · ${esc(mixed ? e.cats.map(k => cat(k.id).name).join(' + ') : c.name)}${e.platform ? ' · ' + esc(e.platform) + (e.device === 'office' ? ' (office)' : '') : ''}${e.friendsShare ? ' · 👥 ' + money0(e.friendsShare) : ''}${e.createdBy && e.createdBy !== e.paidBy ? ' · added by ' + esc(youL(e.createdBy)) : ''}</small></span>
     <span class="ramt"><b>${money(e.amount)}</b>${tag}</span></button>`;
 }
 function quickList() {
@@ -529,7 +555,7 @@ function budgetBar(spent, budget) {
 
 const VIEWS = {
   home() {
-    const ym = monthOf(today()), st = stats(ym), bal = balance(), ot = otherId();
+    const ym = monthOf(today()), st = stats(ym), bal = balance(), ot = otherId(), me0 = meId();
     const open = openItems(), oldest = open.map(e => e.date).sort()[0];
     const openTxt = open.length ? `${open.length} open expense${open.length > 1 ? 's' : ''} since ${niceDate(oldest)}` : 'Nobody owes anything 🎉';
     const balText = !open.length ? ['All settled up', openTxt] : Math.abs(bal) < 0.005 ? ['You are even', openTxt + ' cancel out'] : bal > 0 ? [`${esc(uname(ot))} owes you`, openTxt] : [`You owe ${esc(uname(ot))}`, openTxt];
@@ -543,6 +569,7 @@ const VIEWS = {
     return `${alerts}${nudge}
     <div class="card hero"><h3>${balText[0]}</h3><div class="rowflex between"><div><div class="big">${money(Math.abs(bal))}</div><div class="sub">${balText[1]}</div></div>
       ${open.length ? '<button class="btn" data-act="settle">Settle up</button>' : ''}</div></div>
+    ${(d => d.length ? `<button class="alert info" data-act="nav" data-v="friends" style="width:100%;text-align:left"><span style="font-size:22px">👥</span><span class="grow"><b>Friends owe ${money(d.reduce((s, x) => s + x.amount, 0))}</b><small>${money(d.filter(x => x.e.paidBy === me0).reduce((s, x) => s + x.amount, 0))} to you · ${money(d.filter(x => x.e.paidBy !== me0).reduce((s, x) => s + x.amount, 0))} to ${esc(uname(ot))}</small></span><span class="muted">›</span></button>` : '')(friendDues())}
     ${quick.length ? `<div class="hscroll">${quick.map(e => `<button class="chip" data-act="quick" data-id="${esc(e.id)}">${esc(cat(e.category).emoji + ' ' + e.description)}</button>`).join('')}</div>` : ''}
     <div class="card"><h3>${esc(monthName(ym))}</h3>
       <div class="kpis"><div class="kpi"><small>Total spent</small><b>${money0(st.total)}</b></div><div class="kpi"><small>Your share</small><b>${money0(st.mine)}</b></div><div class="kpi"><small>${esc(uname(ot))}'s share</small><b>${money0(st.theirs)}</b></div></div>
@@ -559,10 +586,12 @@ const VIEWS = {
     return `<div class="monthnav"><button data-act="month" data-n="-1" aria-label="Previous month">‹</button><b>${esc(monthName(ui.month))}</b><button data-act="month" data-n="1" aria-label="Next month">›</button></div>
     <input class="in" id="q" type="search" placeholder="Search description or notes" value="${esc(f.q)}">
     <div class="filters">
-      <select class="in" data-f="who"><option value="">Everyone</option><option value="me" ${f.who === 'me' ? 'selected' : ''}>Paid by you</option><option value="other" ${f.who === 'other' ? 'selected' : ''}>Paid by ${esc(uname(otherId()))}</option><option value="shared" ${f.who === 'shared' ? 'selected' : ''}>Shared only</option><option value="personal" ${f.who === 'personal' ? 'selected' : ''}>Personal only</option></select>
+      <select class="in" data-f="who"><option value="">Everyone</option><option value="me" ${f.who === 'me' ? 'selected' : ''}>Paid by you</option><option value="other" ${f.who === 'other' ? 'selected' : ''}>Paid by ${esc(uname(otherId()))}</option><option value="shared" ${f.who === 'shared' ? 'selected' : ''}>Shared only</option><option value="personal" ${f.who === 'personal' ? 'selected' : ''}>Personal only</option><option value="friends" ${f.who === 'friends' ? 'selected' : ''}>With friends</option></select>
       <select class="in" data-f="cat"><option value="">All categories</option>${S.cats.map(c => `<option value="${esc(c.id)}" ${f.cat === c.id ? 'selected' : ''}>${esc(c.emoji + ' ' + c.name)}</option>`).join('')}</select>
       <select class="in" data-f="mode"><option value="">All modes</option>${MODES.map(m => `<option value="${m[0]}" ${f.mode === m[0] ? 'selected' : ''}>${m[1]}</option>`).join('')}</select>
-    </div><div id="explist">${expList()}</div>`;
+      <select class="in" data-f="plat"><option value="">All platforms</option>${[...new Set([...S.platforms, ...spends().map(e => e.platform).filter(Boolean)])].map(n => `<option ${f.plat === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>
+    </div><div id="explist">${expList()}</div>
+    <button class="btn block" data-act="shareList">Share this list</button>`;
   },
 
   insights() {
@@ -601,6 +630,7 @@ const VIEWS = {
       <div class="card"><h3>Last 6 months</h3><div class="trend">${months.map(x => `<div class="${x.k === ym ? 'cur' : ''}"><b>${x.v ? moneyShort(x.v) : ''}</b><i style="height:${(x.v / maxM * 78).toFixed(1)}%"></i>${monthShort(x.k)}</div>`).join('')}</div></div>
       <div class="card"><h3>How you paid</h3>${modes.map(([id, v]) => `<div class="hb"><span>${esc(modeLabel(id))}</span><div class="bar"><i style="width:${(v / modes[0][1] * 100).toFixed(1)}%"></i></div><b>${money0(v)}</b></div>`).join('')}</div>
     </div>
+    ${(pl => pl.length ? `<div class="card"><h3>By platform</h3>${pl.map(([n, v]) => `<div class="hb"><span>${esc(n)}</span><div class="bar"><i style="width:${(v / pl[0][1] * 100).toFixed(1)}%"></i></div><b>${money0(v)}</b></div>`).join('')}</div>` : '')(Object.entries(st.byPlat).sort((a, b) => b[1] - a[1]))}
     <div class="card"><h3>Who paid, who it was for</h3>
       <div class="rowflex between" style="font-size:13px;margin-bottom:6px"><span>${esc(you(me))} paid <b>${money0(st.paidMe)}</b></span><span>${esc(uname(ot))} paid <b>${money0(st.paidOther)}</b></span></div>
       <div class="split2"><i style="width:${(st.paidMe / paidTot * 100).toFixed(1)}%;background:${esc(ucolor(me))}"></i><i style="flex:1;background:${esc(ucolor(ot))}"></i></div>
@@ -619,6 +649,7 @@ const VIEWS = {
       ${item('recurring', '🔁', 'Recurring expenses', nRec ? `${nRec} active` : 'Rent, subscriptions, EMIs — added automatically')}
       ${item('budgets', '🎯', 'Budgets', S.budgets._total ? `${money0(S.budgets._total)} per month` : 'Set monthly limits')}
       ${item('categories', '🏷️', 'Categories', `${S.activeCats.length} categories`)}
+      ${(d => item('friends', '👥', 'Friends', d.length ? `${money(d.reduce((s, x) => s + x.amount, 0))} to collect · ${d.length} item${d.length > 1 ? 's' : ''}` : 'Split bills with friends and track who has paid back'))(friendDues())}
       ${item('settings', '⚙️', 'Settings', 'Profile, default split, reminders')}
     </div></div>
     <div class="card"><div class="list">
@@ -659,7 +690,18 @@ const VIEWS = {
 
   categories() {
     return `<div class="card"><h3>Emoji · name</h3>${S.activeCats.map(c => `<div class="catrow" data-cat="${esc(c.id)}"><input class="in" data-k="emoji" value="${esc(c.emoji)}" maxlength="4" aria-label="Emoji"><input class="in" data-k="name" value="${esc(c.name)}" maxlength="30" aria-label="Name"><button class="x" data-act="delCat" data-id="${esc(c.id)}" aria-label="Remove">✕</button></div>`).join('')}
-    <button class="btn block" data-act="addCat" style="margin-top:6px">Add category</button></div><p class="hint">Removing a category keeps old expenses as they are.</p>`;
+    <button class="btn block" data-act="addCat" style="margin-top:6px">Add category</button></div><p class="hint">Removing a category keeps old expenses as they are.</p>
+    <div class="card"><h3>Platforms</h3><div class="chips">${S.platforms.map(n => `<button class="chip" data-act="delPlat" data-n="${esc(n)}">${esc(n)} ✕</button>`).join('')}<button class="chip on" data-act="addPlat">+ Add</button></div><p class="hint">Apps and sites you order from. Tap one to remove it from the list.</p></div>`;
+  },
+
+  friends() {
+    const dues = friendDues(), me = meId(), fs = friendsAll().filter(x => !x.archived);
+    const mine = dues.filter(d => d.e.paidBy === me).reduce((s, d) => s + d.amount, 0), theirs = dues.reduce((s, d) => s + d.amount, 0) - mine;
+    const rows = fs.map(fr => { const d = dues.filter(x => x.id === fr.id); return { fr, n: d.length, amt: round2(d.reduce((s, x) => s + x.amount, 0)) }; }).sort((a, b) => b.amt - a.amt);
+    return `<div class="card hero"><h3>Friends owe</h3><div class="big">${money(mine + theirs)}</div><div class="sub">${money(mine)} to you · ${money(theirs)} to ${esc(uname(otherId()))}</div></div>
+    <div class="card">${rows.length ? `<div class="list">${rows.map(r => `<button class="row" data-act="friend" data-id="${esc(r.fr.id)}"><span class="avatar" style="background:var(--surface2);color:var(--ink)">${esc((r.fr.name[0] || '?').toUpperCase())}</span><span class="rmain"><b>${esc(r.fr.name)}</b><small>${r.n ? r.n + ' open item' + (r.n > 1 ? 's' : '') : 'All clear'}</small></span><span class="ramt"><b class="${r.amt ? 'pos' : 'muted'}">${money(r.amt)}</b></span></button>`).join('')}</div>` : '<div class="empty"><b>👥</b>Add friends here, then pick them on any expense<br>to split the bill with them.</div>'}</div>
+    <button class="btn primary block" data-act="addFriend">Add friend</button>
+    <p class="hint">A friend's part of a bill is kept out of your own spending and is owed to whoever paid.</p>`;
   },
 
   settings() {
@@ -687,20 +729,25 @@ const VIEWS = {
   }
 };
 
-function expList() {
+function expFiltered() {
   const f = ui.filter, me = meId(), q = f.q.trim().toLowerCase();
   let list = live().filter(e => q ? true : monthOf(e.date) === ui.month);
-  list = list.filter(e => {
-    if (q && !(e.description + ' ' + e.notes + ' ' + cat(e.category).name).toLowerCase().includes(q)) return false;
-    if (f.cat && e.category !== f.cat) return false;
+  return list.filter(e => {
+    if (q && !(e.description + ' ' + e.notes + ' ' + cat(e.category).name + ' ' + (e.platform || '') + ' ' + (e.platform && e.device === 'office' ? 'office' : '')).toLowerCase().includes(q)) return false;
+    if (f.cat && e.category !== f.cat && !(e.cats || []).some(c => c.id === f.cat)) return false;
+    if (f.plat && e.platform !== f.plat) return false;
     if (f.mode && e.mode !== f.mode) return false;
     if (f.who === 'me' && e.paidBy !== me) return false;
     if (f.who === 'other' && e.paidBy === me) return false;
     const personal = e.type !== 'settlement' && shareOf(e, other(e.paidBy)) === 0;
     if (f.who === 'shared' && (personal || e.type === 'settlement')) return false;
     if (f.who === 'personal' && !personal) return false;
+    if (f.who === 'friends' && !e.friendsShare) return false;
     return true;
   }).sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
+}
+function expList() {
+  const list = expFiltered(), q = ui.filter.q.trim();
   if (!list.length) return `<div class="empty"><b>🔍</b>${q ? 'No matches.' : 'Nothing here for ' + esc(monthName(ui.month)) + '.'}</div>`;
   const total = list.filter(e => e.type !== 'settlement').reduce((s, e) => s + e.amount, 0);
   let html = `<p class="hint">${list.length} entr${list.length === 1 ? 'y' : 'ies'} · ${money(total)}${q ? ' · all months' : ''}</p><div class="card" style="padding-top:2px">`, cur = '';
@@ -719,36 +766,83 @@ function openExpense(existing, preset) {
   const f = existing ? { ...existing } : { id: uid(), type: 'expense', date: today(), amount: '', description: '', category: '', paidBy: me, mode: prefs.lastMode || 'upi', cardId: '', splitType: prefs.lastSplit || 'shared', notes: '', ...preset };
   f.payerPct = 50; f.cm = prefs.lastCustom || 'items'; f.own1 = ''; f.own2 = ''; f.ex1 = '';
   if (existing && existing.splitType === 'custom') { f.cm = 'amounts'; f.ex1 = existing.share1; }
-  if (existing && existing.amount) {
-    f.payerPct = Math.round(shareOf(existing, existing.paidBy) / existing.amount * 1000) / 10;
-    const d = computeShares(existing.amount, existing.paidBy, existing.splitType, f.payerPct);
+  f.platform = f.platform || ''; f.device = f.device || 'primary';
+  f.mixed = !!(existing && (existing.cats || []).length > 1);
+  f.parts = f.mixed ? existing.cats.map(c => ({ id: c.id, amount: c.amount })) : [];
+  f.fr = {}; f.frMode = existing ? 'amounts' : (preset && preset.frMode) || 'equal';
+  if (existing) (existing.friends || []).forEach(p => (f.fr[p.id] = p.amount)); else if (preset && preset.fr) f.fr = { ...preset.fr };
+  const base0 = existing ? round2(existing.amount - (existing.friendsShare || 0)) : 0;
+  if (existing && base0) {
+    f.payerPct = Math.round(shareOf(existing, existing.paidBy) / base0 * 1000) / 10;
+    const d = computeShares(base0, existing.paidBy, existing.splitType, f.payerPct);
     if (existing.splitType === 'shared' && Math.abs(d.share1 - existing.share1) > 0.01) { f.splitType = 'custom'; f.cm = 'amounts'; f.ex1 = existing.share1; }
   }
+  /* reopen a custom split the way it was entered */
+  const si = existing && existing.splitType === 'custom' ? existing.splitInfo || {} : {};
+  if (si.cm === 'items') { f.cm = 'items'; f.own1 = si.own1 || ''; f.own2 = si.own2 || ''; }
+  else if (si.cm === 'pct' && isFinite(Number(si.pct))) { f.cm = 'pct'; f.payerPct = Number(si.pct); }
   if (!existing && f.mode === 'credit_card') f.cardId = prefs.lastCard || '';
   const locked = !!(existing && existing.settledBy), touched = new Set(Object.keys(preset || {}));
+  /* the form stays short: sections are one-line rows until tapped */
+  const open = new Set(); let allCats = false, platQ = false;
+  if (f.splitType === 'custom') open.add('split');
+  if (Object.keys(f.fr).length) open.add('friends');
+  const since = addDays(today(), -120), catUse = {}, platUse = {};
+  spends().forEach(e => { if (e.date < since) return; catUse[e.category] = (catUse[e.category] || 0) + 1; if (e.platform) platUse[e.platform] = (platUse[e.platform] || 0) + 1; });
+  const catRank = S.activeCats.slice().sort((a, b) => (catUse[b.id] || 0) - (catUse[a.id] || 0));
+  const platAll = () => [...new Set([...Object.keys(platUse).sort((a, b) => platUse[b] - platUse[a]), ...S.platforms])];
   const body = openSheet(existing ? 'Edit expense' : 'Add expense', '');
 
   const collect = () => {
     const g = id => $('#' + id, body);
     if (!g('fAmt')) return;
-    f.amount = g('fAmt').value; f.description = g('fDesc').value; f.notes = g('fNotes').value;
-    if (g('fDate').value) f.date = g('fDate').value;
+    f.amount = g('fAmt').value; f.description = g('fDesc').value;
+    if (g('fNotes')) f.notes = g('fNotes').value;
+    if (g('fDate') && g('fDate').value) f.date = g('fDate').value;
     if (g('fPct')) f.payerPct = Math.min(100, Math.max(0, num(g('fPct').value)));
     if (g('fOwn1')) { f.own1 = g('fOwn1').value; f.own2 = g('fOwn2').value; }
     if (g('fEx1')) f.ex1 = g('fEx1').value;
+    $$('[data-frid]', body).forEach(i => (f.fr[i.dataset.frid] = i.value));
+    $$('[data-mcat]', body).forEach(i => { if (f.parts[i.dataset.mcat]) f.parts[i.dataset.mcat].id = i.value; });
+    $$('[data-mamt]', body).forEach(i => { if (f.parts[i.dataset.mamt]) f.parts[i.dataset.mamt].amount = i.value; });
   };
+  /* mixed order: any categories, each with its amount; anything left unassigned goes to the first one */
+  const catAlloc = (a = calc(f.amount)) => {
+    const m = new Map();
+    if (f.mixed) f.parts.forEach(p => { if (p.id) m.set(p.id, round2((m.get(p.id) || 0) + Math.max(0, calc(p.amount)))); });
+    const list = [...m].map(([id, amount]) => ({ id, amount })), left = round2(a - list.reduce((s, c) => s + c.amount, 0));
+    if (list.length && left > 0) list[0].amount = round2(list[0].amount + left);
+    return { list: list.length > 1 ? list : [], left, n: list.length };
+  };
+  /* friends' parts come off the top; the two of you split what is left */
+  const frAlloc = (a = calc(f.amount)) => {
+    const ids = Object.keys(f.fr); if (!ids.length) return [];
+    if (f.frMode === 'equal') { const each = round2(a / (ids.length + (/personal|other/.test(f.splitType) ? 1 : 2))); return ids.map(id => ({ id, amount: each })); }
+    return ids.map(id => ({ id, amount: round2(Math.max(0, calc(f.fr[id]))) }));
+  };
+  const frTotal = a => round2(frAlloc(a).reduce((s, p) => s + p.amount, 0));
+  const base = () => round2(Math.max(0, calc(f.amount) - frTotal()));
   /* uneven splits: by items (each person's own items + shared rest), exact amounts, or percent */
-  const shares = (a = calc(f.amount)) => {
+  const shares = (a = base()) => {
     if (f.splitType !== 'custom' || f.cm === 'pct') return computeShares(a, f.paidBy, f.splitType, f.payerPct);
     if (f.cm === 'amounts') { const s1 = round2(Math.min(a, Math.max(0, num(f.ex1)))); return { share1: s1, share2: round2(a - s1) }; }
     const o1 = Math.max(0, num(f.own1)), o2 = Math.max(0, num(f.own2)), rest = Math.max(0, a - o1 - o2);
     const s1 = round2(Math.min(a, o1 + rest * S.split / 100)); return { share1: s1, share2: round2(a - s1) };
   };
+  if (si.cm && si.cm !== 'amounts' && Math.abs(shares(base0).share1 - existing.share1) > 0.01) { f.cm = 'amounts'; f.ex1 = existing.share1; }   // edited elsewhere: trust the saved shares
+  const splitDetail = () => f.splitType !== 'custom' ? '' : f.cm === 'items' ? `By items: only ${youL('u1')} ${money(num(f.own1))}, only ${youL('u2')} ${money(num(f.own2))}, rest shared ${S.split}/${100 - S.split}` : f.cm === 'pct' ? `By percent: ${youL(f.paidBy)} ${f.payerPct}%, ${youL(other(f.paidBy))} ${round2(100 - f.payerPct)}%` : 'Exact amounts';
   const summary = () => {
-    const a = calc(f.amount), sh = shares(a), o = other(f.paidBy), owed = shareOf(sh, o);
-    if (!a) return 'Enter an amount';
-    if (!owed) return `${you(f.paidBy)} cover${f.paidBy === me ? '' : 's'} all of it — nothing to split`;
-    return `${you(o)} owe${o === me ? '' : 's'} ${youL(f.paidBy)} <b>${money(owed)}</b> · ${youL(f.paidBy)} ${f.paidBy === me ? 'keep' : 'keeps'} ${money(shareOf(sh, f.paidBy))}`;
+    const a = calc(f.amount), sh = shares(), o = other(f.paidBy), owed = shareOf(sh, o);
+    if (!a) return '';
+    if (!owed) return Object.keys(f.fr).length ? 'Nothing to split between the two of you' : `${you(f.paidBy)} cover${f.paidBy === me ? '' : 's'} all of it — nothing to split`;
+    return `${you(o)} owe${o === me ? '' : 's'} ${youL(f.paidBy)} <b>${money(owed)}</b> · ${youL(f.paidBy)} ${f.paidBy === me ? 'keep' : 'keeps'} ${money(shareOf(sh, f.paidBy))}${f.splitType === 'custom' ? '<br>' + esc(splitDetail()) : ''}`;
+  };
+  const sec = (key, label, value, content) => open.has(key)
+    ? `<div class="fsec"><button type="button" class="flabel shut" data-close="${key}">${label} ▴</button>${content}</div>`
+    : `<button type="button" class="crow" data-open="${key}"><span>${label}</span><b>${value}</b><i>›</i></button>`;
+  const platResults = q => {
+    const all = platAll(), ql = q.trim().toLowerCase(), hits = all.filter(n => n.toLowerCase().includes(ql)).slice(0, 8);
+    return hits.map(n => chip(f.platform === n, `data-plat="${esc(n)}"`, esc(n))).join('') + (ql && !all.some(n => n.toLowerCase() === ql) ? `<button type="button" class="chip on" data-platnew="1">+ Add “${esc(q.trim())}”</button>` : '') || '<span class="hint">Type a name to add it.</span>';
   };
   const draw = () => {
     const sp = S.split, o = other(f.paidBy), t = today();
@@ -757,14 +851,35 @@ function openExpense(existing, preset) {
     if (f.mode !== 'credit_card') f.cardId = '';
     const descs = [...new Set(spends().sort((a, b) => b.createdAt - a.createdAt).map(e => e.description).filter(Boolean))].slice(0, 60);
     const stl = locked && state.expenses.find(x => x.id === existing.settledBy);
+    let shownCats = allCats ? S.activeCats : catRank.slice(0, 6);
+    if (f.category && !shownCats.some(c => c.id === f.category)) shownCats = [cat(f.category), ...shownCats.slice(0, 5)];
+    const shownPl = [...new Set([f.platform, ...platAll()].filter(Boolean))].slice(0, 4);
+    const card = myCards.find(c => c.id === f.cardId), frIds = Object.keys(f.fr);
+    const splitName = { shared: `Shared ${sp}/${100 - sp}`, personal: `Just ${youL(f.paidBy)}`, other: `All ${youL(o)}${o === me ? 'rs' : "'s"}`, custom: 'Custom' }[f.splitType] || 'Shared';
+    const catOpts = sel => `<option value="">Choose category</option>${S.activeCats.concat(sel && !S.activeCats.some(c => c.id === sel) ? [cat(sel)] : []).map(c => `<option value="${esc(c.id)}" ${c.id === sel ? 'selected' : ''}>${esc(c.emoji + ' ' + c.name)}</option>`).join('')}`;
+
     body.innerHTML = `${locked ? `<div class="alert info"><span style="font-size:20px">✅</span><span class="grow"><b>Settled${stl ? ' on ' + niceDate(stl.date) : ''}</b><small>Amount, payer and split are locked. Undo the settlement to change them.</small></span></div>` : ''}
       <div class="amount"><span>${esc(S.cur)}</span><input id="fAmt" inputmode="decimal" placeholder="0" value="${esc(f.amount)}" autocomplete="off" ${locked ? 'readonly' : ''}>${locked ? '' : '<button type="button" class="plus" data-plus="1" aria-label="Add another amount">+</button>'}</div><p class="hint" id="fCalc" style="margin:-10px 0 12px"></p>
       <div class="fsec"><input class="in" id="fDesc" placeholder="What was it for?" value="${esc(f.description)}" list="descs" maxlength="80" autocomplete="off"><datalist id="descs">${descs.map(d => `<option value="${esc(d)}">`).join('')}</datalist></div>
-      <div class="fsec"><span class="flabel">Category</span><div class="chips">${S.activeCats.map(c => chip(f.category === c.id, `data-set="category" data-val="${esc(c.id)}"`, esc(c.emoji + ' ' + c.name))).join('')}</div></div>
-      <div class="fsec"><span class="flabel">Paid by</span><div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.paidBy === id ? 'on' : ''}" data-set="paidBy" data-val="${id}">${esc(you(id))}</button>`).join('')}</div></div>
-      <div class="fsec"><span class="flabel">Payment mode</span><div class="chips">${MODES.map(m => chip(f.mode === m[0], `data-set="mode" data-val="${m[0]}"`, m[2] + ' ' + m[1])).join('')}</div>
-        ${f.mode === 'credit_card' ? `<div class="chips" style="margin-top:8px">${myCards.length ? myCards.map(c => chip(f.cardId === c.id, `data-set="cardId" data-val="${esc(c.id)}"`, esc(c.name + (c.last4 ? ' ••' + c.last4 : '')))).join('') : `<span class="hint">No cards saved for ${esc(youL(f.paidBy))} yet. Add them under More → Credit cards to track bills.</span>`}</div>` : ''}</div>
-      <div class="fsec"><span class="flabel">Split</span><div class="chips">
+
+      <div class="fsec"><span class="flabel">Category</span>${f.mixed
+        ? `${f.parts.map((p, i) => `<div class="mrow"><select class="in" data-mcat="${i}" aria-label="Category">${catOpts(p.id)}</select><input class="in" data-mamt="${i}" inputmode="decimal" placeholder="Amount" value="${esc(p.amount)}" aria-label="Amount"><button type="button" class="x" data-mdel="${i}" aria-label="Remove">✕</button></div>`).join('')}
+           <div class="chips"><button type="button" class="chip" data-madd="1">+ Add category</button><button type="button" class="chip on" data-mixed="1">🔀 Mixed order ✕</button></div><p class="hint" id="fCatSum"></p>`
+        : `<div class="chips">${shownCats.map(c => chip(f.category === c.id, `data-set="category" data-val="${esc(c.id)}"`, esc(c.emoji + ' ' + c.name))).join('')}${S.activeCats.length > 6 ? `<button type="button" class="chip ghost" data-allcats="1">${allCats ? 'Less ▴' : 'More ▾'}</button>` : ''}<button type="button" class="chip ghost" data-mixed="1">🔀 Mixed</button></div>`}</div>
+
+      <div class="fsec"><span class="flabel">Platform</span>${platQ
+        ? `<div class="rowflex"><input class="in" id="fPlatQ" placeholder="Search or type a new one" autocomplete="off" maxlength="24"><button type="button" class="x" data-platq="" aria-label="Close search">✕</button></div><div class="chips" id="fPlatRes" style="margin-top:8px">${platResults('')}</div>`
+        : `<div class="chips">${shownPl.map(n => chip(f.platform === n, `data-plat="${esc(n)}"`, esc(n))).join('')}<button type="button" class="chip ghost" data-platq="1">🔍 Search / add</button></div>`}
+        ${f.platform ? `<div class="seg" style="margin-top:10px">${Object.keys(DEVICES).map(k => `<button type="button" class="${f.device === k ? 'on' : ''}" data-set="device" data-val="${k}">${DEVICES[k]}</button>`).join('')}</div>` : ''}</div>
+
+      ${sec('pay', 'Paid by', `${esc(you(f.paidBy))} · ${esc(card ? card.name : modeLabel(f.mode))}${!existing && f.paidBy !== me ? ' · on their behalf' : ''}`,
+        `<div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.paidBy === id ? 'on' : ''}" data-set="paidBy" data-val="${id}">${esc(you(id))}</button>`).join('')}</div>
+        ${!existing && f.paidBy !== me ? `<p class="hint">Adding this on ${esc(uname(f.paidBy))}'s behalf. It counts as paid by ${esc(uname(f.paidBy))} and is marked “added by you”.</p>` : existing && existing.createdBy && existing.createdBy !== existing.paidBy ? `<p class="hint">Added by ${esc(youL(existing.createdBy))} on ${esc(youL(existing.paidBy))}${existing.paidBy === me ? 'r' : "'s"} behalf.</p>` : ''}
+        <div class="chips" style="margin-top:10px">${MODES.map(m => chip(f.mode === m[0], `data-set="mode" data-val="${m[0]}"`, m[2] + ' ' + m[1])).join('')}</div>
+        ${f.mode === 'credit_card' ? `<div class="chips" style="margin-top:8px">${myCards.length ? myCards.map(c => chip(f.cardId === c.id, `data-set="cardId" data-val="${esc(c.id)}"`, esc(c.name + (c.last4 ? ' ••' + c.last4 : '')))).join('') : `<span class="hint">No cards saved for ${esc(youL(f.paidBy))} yet. Add them under More → Credit cards to track bills.</span>`}</div>` : ''}`)}
+
+      ${sec('split', 'Split', esc(splitName),
+        `<div class="chips">
         ${chip(f.splitType === 'shared', 'data-set="splitType" data-val="shared"', `Shared ${sp}/${100 - sp}`)}
         ${chip(f.splitType === 'personal', 'data-set="splitType" data-val="personal"', `Just ${esc(youL(f.paidBy))}`)}
         ${chip(f.splitType === 'other', 'data-set="splitType" data-val="other"', `All ${esc(youL(o))}${o === me ? 'rs' : "'s"}`)}
@@ -772,10 +887,18 @@ function openExpense(existing, preset) {
         ${f.splitType === 'custom' ? `<div class="seg" style="margin:10px 0">${[['items', 'By items'], ['amounts', 'Exact amounts'], ['pct', 'Percent']].map(m => `<button type="button" class="${f.cm === m[0] ? 'on' : ''}" data-set="cm" data-val="${m[0]}">${m[1]}</button>`).join('')}</div>
           ${f.cm === 'items' ? `<div class="two"><label class="f"><span>Only ${esc(youL('u1'))}</span><input class="in" id="fOwn1" inputmode="decimal" placeholder="0" value="${esc(f.own1)}"></label><label class="f"><span>Only ${esc(youL('u2'))}</span><input class="in" id="fOwn2" inputmode="decimal" placeholder="0" value="${esc(f.own2)}"></label></div><p class="hint" style="margin-top:-6px" id="fRest"></p>`
           : f.cm === 'amounts' ? `<div class="two"><label class="f"><span>${esc(you('u1'))}${meId() === 'u1' ? 'r' : "'s"} share</span><input class="in" id="fEx1" inputmode="decimal" placeholder="0" value="${esc(f.ex1)}"></label><label class="f"><span>${esc(you('u2'))}${meId() === 'u2' ? 'r' : "'s"} share</span><input class="in" id="fEx2" inputmode="decimal" placeholder="0"></label></div>`
-          : `<div class="rowflex"><input type="range" id="fPct" min="0" max="100" step="1" value="${f.payerPct}"><b id="fPctL" style="min-width:150px;text-align:right;font-size:13px"></b></div>`}` : ''}
-        <p class="hint" id="fSum"></p></div>
-      <div class="fsec"><span class="flabel">Date</span><div class="rowflex">${chip(f.date === t, 'data-set="date" data-val="' + t + '"', 'Today')}${chip(f.date === addDays(t, -1), 'data-set="date" data-val="' + addDays(t, -1) + '"', 'Yesterday')}<input class="in" type="date" id="fDate" value="${esc(f.date)}" max="2099-12-31"></div></div>
-      <div class="fsec"><input class="in" id="fNotes" placeholder="Notes (optional)" value="${esc(f.notes)}" maxlength="300"></div>
+          : `<div class="rowflex"><input type="range" id="fPct" min="0" max="100" step="1" value="${f.payerPct}"><b id="fPctL" style="min-width:150px;text-align:right;font-size:13px"></b></div>`}` : ''}`)}
+      <p class="hint" id="fSum" style="margin:-2px 2px 10px"></p>
+
+      ${sec('friends', 'Friends', frIds.length ? esc(frIds.map(friendName).join(', ')) + ' · <span id="fFrMini"></span>' : 'None',
+        locked ? `<p class="hint" style="margin:0">${(existing.friends || []).map(p => esc(friendName(p.id)) + ' ' + money(p.amount)).join(' · ') || 'No friends on this one'}</p>` : `<div class="chips">${friendsAll().filter(x => !x.archived || x.id in f.fr).map(x => chip(x.id in f.fr, `data-fr="${esc(x.id)}"`, esc(x.name))).join('')}<button type="button" class="chip ghost" data-fradd="1">+ Add friend</button></div>
+        ${frIds.length ? `<div class="seg" style="margin:10px 0"><button type="button" class="${f.frMode === 'equal' ? 'on' : ''}" data-set="frMode" data-val="equal">Equal with everyone</button><button type="button" class="${f.frMode === 'amounts' ? 'on' : ''}" data-set="frMode" data-val="amounts">Enter amounts</button></div>
+          ${f.frMode === 'amounts' ? `<div class="two">${frIds.map(id => `<label class="f"><span>${esc(friendName(id))}</span><input class="in" data-frid="${esc(id)}" inputmode="decimal" placeholder="0" value="${esc(f.fr[id])}"></label>`).join('')}</div>` : ''}<p class="hint" id="fFrSum" style="margin-top:0"></p>` : ''}`)}
+
+      ${sec('when', 'Date & notes', esc(dayLabel(f.date)) + (f.notes ? ' · 📝' : ''),
+        `<div class="rowflex">${chip(f.date === t, 'data-set="date" data-val="' + t + '"', 'Today')}${chip(f.date === addDays(t, -1), 'data-set="date" data-val="' + addDays(t, -1) + '"', 'Yesterday')}<input class="in" type="date" id="fDate" value="${esc(f.date)}" max="2099-12-31"></div>
+        <input class="in" id="fNotes" placeholder="Notes (optional)" value="${esc(f.notes)}" maxlength="300" style="margin-top:10px">`)}
+
       <div class="stick"><button class="btn primary block" data-save="1">${existing ? 'Save changes' : 'Save expense'}</button>
       <div class="rowflex" style="margin-top:8px">${existing ? '<button class="btn danger grow" data-del="1">Delete</button><button class="btn grow" data-dup="1">Duplicate</button>' + (!locked && lentOf(existing) ? '<button class="btn grow" data-one="1">Settle this</button>' : '') : '<button class="btn grow" data-save="again">Save & add another</button>'}</div></div>`;
     upd();
@@ -783,24 +906,45 @@ function openExpense(existing, preset) {
   const upd = () => {
     $('#fSum', body).innerHTML = summary();
     $('#fCalc', body).textContent = /[+\-*x×\/]/.test(String(f.amount).slice(1)) ? `= ${money(calc(f.amount))}` : '';
+    const cs = $('#fCatSum', body);
+    if (cs) { const ca = catAlloc(), a0 = calc(f.amount), first = f.parts.find(p => p.id);
+      cs.innerHTML = ca.left < -0.005 ? `<span class="neg">These add up to ${money(-ca.left)} more than the total.</span>` : ca.n < 2 ? 'Choose at least two categories and enter what was spent on each.' : !a0 ? '' : ca.left > 0.005 ? `${money(ca.left)} not assigned yet — it will count as ${esc(cat(first.id).name)}.` : 'Adds up to the total ✓'; }
+    const fs = $('#fFrSum', body), mini = $('#fFrMini', body);
+    if (mini) mini.textContent = money(frTotal());
+    if (fs) { const al = frAlloc(), t = frTotal(), a0 = calc(f.amount); fs.innerHTML = !a0 ? '' : t > a0 + 0.005 ? '<span class="neg">Friends\' parts add up to more than the total.</span>' : `${al.map(p => esc(friendName(p.id)) + ' ' + money(p.amount)).join(' · ')}<br>Friends owe ${youL(f.paidBy)} <b>${money(t)}</b> · ${money(Math.max(0, a0 - t))} left between the two of you`; }
     const l = $('#fPctL', body);
     if (l) l.textContent = `${you(f.paidBy)} ${f.payerPct}% · ${you(other(f.paidBy))} ${round2(100 - f.payerPct)}%`;
-    const a = calc(f.amount), e2 = $('#fEx2', body), rest = $('#fRest', body);
+    const a = base(), e2 = $('#fEx2', body), rest = $('#fRest', body);
     if (e2 && document.activeElement !== e2) e2.value = a ? round2(Math.max(0, a - num(f.ex1))) : '';
     if (rest) { const r = round2(a - num(f.own1) - num(f.own2)); rest.innerHTML = r < 0 ? '<span class="neg">These add up to more than the total.</span>' : `What each of you ordered just for yourself. The remaining <b>${money(Math.max(0, r))}</b> is shared ${S.split}/${100 - S.split}.`; }
   };
+  /* redraw without losing the field being typed in */
+  const softDraw = () => {
+    if (!body.isConnected || !$('#fAmt', body)) return;
+    const id = document.activeElement && body.contains(document.activeElement) ? document.activeElement.id : '';
+    collect(); draw();
+    const el = id && $('#' + id, body);
+    if (el) { el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch {} }
+  };
+  const pickPlatform = n => { collect(); touched.add('platform'); f.platform = n; platQ = false; draw(); };
   const save = again => {
     collect();
     const a = round2(calc(f.amount));
     if (!(a > 0)) { toast('Enter an amount'); $('#fAmt', body).focus(); return; }
     const dup = !existing && spends().find(e => e.date === f.date && e.amount === a && e.id !== f.id);
     if (dup && !confirm(`${you(dup.paidBy)} already logged ${money(a)} for “${dup.description}” on ${niceDate(dup.date)}.\n\nAdd this one as well?`)) return;
-    if (!locked && f.splitType === 'custom' && ((f.cm === 'items' && num(f.own1) + num(f.own2) > a + 0.005) || (f.cm === 'amounts' && num(f.ex1) > a + 0.005))) return toast('The split adds up to more than the total');
+    const fal = locked ? (existing.friends || []) : frAlloc(a).filter(p => p.amount > 0), ft = round2(fal.reduce((s, p) => s + p.amount, 0)), b0 = round2(a - ft);
+    if (!locked && ft > a + 0.005) return toast('Friends\' parts add up to more than the total');
+    if (!locked && f.splitType === 'custom' && ((f.cm === 'items' && num(f.own1) + num(f.own2) > b0 + 0.005) || (f.cm === 'amounts' && num(f.ex1) > b0 + 0.005))) return toast('The split adds up to more than the total');
     if (f.splitType === 'custom') prefs.lastCustom = f.cm;
-    const category = f.category || 'other';
-    const row = { id: f.id, type: 'expense', date: f.date, amount: a, description: f.description.trim() || cat(category).name, category, paidBy: f.paidBy, mode: f.mode, cardId: f.cardId, splitType: f.splitType, ...shares(a), notes: f.notes.trim(), recurringId: f.recurringId || '', settledBy: f.settledBy || '', createdAt: f.createdAt || Date.now(), deleted: false };
-    if (locked) Object.assign(row, { amount: existing.amount, paidBy: existing.paidBy, splitType: existing.splitType, share1: existing.share1, share2: existing.share2 });
-    prefs.lastMode = f.mode; prefs.lastSplit = f.splitType === 'custom' ? 'shared' : f.splitType; if (f.cardId) prefs.lastCard = f.cardId; savePrefs();
+    const ca = catAlloc(a);
+    if (f.mixed && f.parts.some(p => !p.id && calc(p.amount) > 0)) return toast('Choose a category for each part');
+    if (f.mixed && ca.left < -0.005) return toast('Category amounts add up to more than the total');
+    const cal = ca.list.filter(c => c.amount > 0);
+    const category = (cal.length > 1 ? cal.slice().sort((x, y) => y.amount - x.amount)[0].id : f.mixed ? (f.parts.find(p => p.id) || {}).id : f.category) || 'other';
+    const row = { id: f.id, type: 'expense', date: f.date, amount: a, description: f.description.trim() || cat(category).name, category, paidBy: f.paidBy, mode: f.mode, cardId: f.cardId, splitType: f.splitType, ...shares(b0), friendsShare: ft, friends: fal.map(p => ({ id: p.id, amount: p.amount, settled: ((existing && existing.friends || []).find(x => x.id === p.id) || {}).settled || '' })), notes: f.notes.trim(), platform: f.platform, device: f.platform ? f.device : '', cats: cal.length > 1 ? cal : [], splitInfo: f.splitType !== 'custom' ? {} : f.cm === 'items' ? { cm: 'items', own1: num(f.own1), own2: num(f.own2) } : f.cm === 'pct' ? { cm: 'pct', pct: f.payerPct } : { cm: 'amounts' }, recurringId: f.recurringId || '', settledBy: f.settledBy || '', createdBy: existing ? existing.createdBy : me, createdAt: f.createdAt || Date.now(), deleted: false };
+    if (locked) Object.assign(row, { amount: existing.amount, paidBy: existing.paidBy, splitType: existing.splitType, share1: existing.share1, share2: existing.share2, friendsShare: existing.friendsShare || 0, friends: existing.friends || [], splitInfo: existing.splitInfo || {} });
+    prefs.lastMode = f.paidBy === me ? f.mode : prefs.lastMode; prefs.lastSplit = f.splitType === 'custom' ? 'shared' : f.splitType; if (f.cardId && f.paidBy === me) prefs.lastCard = f.cardId; savePrefs();
     mutate('Expenses', row);
     let msg = existing ? 'Updated' : `Saved ${money(a)}`;
     if (!existing && monthOf(row.date) === monthOf(today())) {
@@ -812,35 +956,64 @@ function openExpense(existing, preset) {
     if (again) openExpense(null, { date: f.date, paidBy: f.paidBy }); else closeSheet();
   };
   body.onclick = ev => {
-    const s = ev.target.closest('[data-set]');
-    if (s) { if (locked && /paidBy|splitType/.test(s.dataset.set)) return toast('Settled — undo the settlement to change this'); collect(); touched.add(s.dataset.set); const was = shares(); f[s.dataset.set] = s.dataset.val; if (s.dataset.set === 'cm' && f.cm === 'amounts' && calc(f.amount)) f.ex1 = was.share1; draw(); return; }
-    if (ev.target.closest('[data-plus]')) { const i = $('#fAmt', body); if (i.value && !/[+\-*\/]$/.test(i.value)) i.value += '+'; f.amount = i.value; i.focus(); return upd(); }
-    const sv = ev.target.closest('[data-save]');
+    const hit = sel => ev.target.closest(sel);
+    const op = hit('[data-open]'); if (op) { collect(); open.add(op.dataset.open); return draw(); }
+    const cl = hit('[data-close]'); if (cl) { collect(); open.delete(cl.dataset.close); return draw(); }
+    const s = hit('[data-set]');
+    if (s) { if (locked && /paidBy|splitType/.test(s.dataset.set)) return toast('Settled — undo the settlement to change this'); collect(); touched.add(s.dataset.set); const was = shares(), wasFr = frAlloc(); f[s.dataset.set] = s.dataset.val;
+      if (s.dataset.set === 'paidBy' && !existing && !touched.has('mode')) {      // entering for the other person: start from how they usually pay
+        const last = f.paidBy === me ? null : spends().filter(e => e.paidBy === f.paidBy).sort((x, y) => y.createdAt - x.createdAt)[0];
+        if (last) { f.mode = last.mode; f.cardId = last.cardId; } else if (f.paidBy === me) { f.mode = prefs.lastMode || 'upi'; f.cardId = ''; }
+      }
+      if (s.dataset.set === 'frMode' && f.frMode === 'amounts' && calc(f.amount)) wasFr.forEach(p => (f.fr[p.id] = p.amount));
+      if (s.dataset.set === 'cm' && f.cm === 'amounts' && calc(f.amount)) f.ex1 = was.share1;
+      return draw(); }
+    if (hit('[data-plus]')) { const i = $('#fAmt', body); if (i.value && !/[+\-*\/]$/.test(i.value)) i.value += '+'; f.amount = i.value; i.focus(); return upd(); }
+    if (hit('[data-allcats]')) { collect(); allCats = !allCats; return draw(); }
+    if (hit('[data-mixed]')) { collect(); f.mixed = !f.mixed; if (f.mixed) f.parts = [{ id: f.category || '', amount: '' }, { id: '', amount: '' }]; else f.category = (f.parts.find(p => p.id) || {}).id || f.category; return draw(); }
+    if (hit('[data-madd]')) { collect(); f.parts.push({ id: '', amount: '' }); return draw(); }
+    const md = hit('[data-mdel]'); if (md) { collect(); f.parts.splice(Number(md.dataset.mdel), 1); if (!f.parts.length) f.parts.push({ id: '', amount: '' }); return draw(); }
+    const pq = hit('[data-platq]'); if (pq) { collect(); platQ = !!pq.dataset.platq; draw(); if (platQ) $('#fPlatQ', body).focus(); return; }
+    const pc = hit('[data-plat]'); if (pc) return pickPlatform(f.platform === pc.dataset.plat && !platQ ? '' : pc.dataset.plat);
+    if (hit('[data-platnew]')) { const n = $('#fPlatQ', body).value.trim().slice(0, 24); if (!n) return; if (!S.platforms.includes(n)) setSetting('platforms', [...S.platforms, n]); return pickPlatform(n); }
+    const frc = hit('[data-fr]');
+    if (frc) { collect(); const id = frc.dataset.fr; if (id in f.fr) delete f.fr[id]; else f.fr[id] = ''; return draw(); }
+    if (hit('[data-fradd]')) { const name = (prompt('Friend\'s name') || '').trim().slice(0, 30); if (!name) return; collect(); const id = 'f' + uid(); setSetting('friends', [...friendsAll(), { id, name }]); f.fr[id] = ''; return draw(); }
+    const sv = hit('[data-save]');
     if (sv) return save(sv.dataset.save === 'again');
-    if (ev.target.closest('[data-one]')) return openSettle([existing.id]);
-    if (ev.target.closest('[data-del]')) { if (locked) return toast('Settled — undo the settlement first'); if (confirm('Delete this expense?')) { mutate('Expenses', { ...existing, deleted: true }); closeSheet(); toast('Deleted', { label: 'Undo', fn: () => mutate('Expenses', { ...existing, deleted: false }) }); } return; }
-    if (ev.target.closest('[data-dup]')) { collect(); openExpense(null, { ...f, id: uid(), date: today(), recurringId: '', settledBy: '', createdAt: 0 }); }
+    if (hit('[data-one]')) return openSettle([existing.id]);
+    if (hit('[data-del]')) { if (locked) return toast('Settled — undo the settlement first'); if (confirm('Delete this expense?')) { mutate('Expenses', { ...existing, deleted: true }); closeSheet(); toast('Deleted', { label: 'Undo', fn: () => mutate('Expenses', { ...existing, deleted: false }) }); } return; }
+    if (hit('[data-dup]')) { collect(); openExpense(null, { ...f, id: uid(), date: today(), recurringId: '', settledBy: '', createdAt: 0, frMode: 'amounts' }); }
   };
   body.oninput = ev => {
-    if (ev.target.id === 'fAmt') { f.amount = ev.target.value; upd(); }
-    if (ev.target.id === 'fPct') { f.payerPct = num(ev.target.value); upd(); }
-    if (/^fOwn/.test(ev.target.id)) { collect(); upd(); }
-    if (ev.target.id === 'fEx1') { f.ex1 = ev.target.value; upd(); }
-    if (ev.target.id === 'fEx2') { f.ex1 = round2(Math.max(0, calc(f.amount) - num(ev.target.value))); $('#fEx1', body).value = f.ex1; upd(); }
+    const t = ev.target;
+    if (t.id === 'fAmt') { f.amount = t.value; upd(); }
+    if (t.id === 'fPct') { f.payerPct = num(t.value); upd(); }
+    if (/^fOwn/.test(t.id) || t.dataset.frid || t.dataset.mamt) { collect(); upd(); }
+    if (t.id === 'fEx1') { f.ex1 = t.value; upd(); }
+    if (t.id === 'fEx2') { f.ex1 = round2(Math.max(0, base() - num(t.value))); $('#fEx1', body).value = f.ex1; upd(); }
+    if (t.id === 'fPlatQ') $('#fPlatRes', body).innerHTML = platResults(t.value);
   };
   body.onchange = ev => {
-    if (ev.target.id === 'fDate') { collect(); draw(); }
-    if (ev.target.id === 'fDesc') {       // learn from history, then from keywords; update chips in place so a tap in progress is not lost
-      const d = ev.target.value.trim().toLowerCase(); if (!d) return;
+    const t = ev.target;
+    if (t.id === 'fDate') { collect(); draw(); }
+    if (t.dataset.mcat) { collect(); upd(); }
+    if (t.id === 'fDesc') {       // learn from history, then from keywords
+      const d = t.value.trim().toLowerCase(); if (!d) return;
       const prev = spends().sort((a, b) => b.createdAt - a.createdAt).find(e => e.description.toLowerCase() === d);
-      f.description = ev.target.value;
-      if (!f.category) f.category = prev ? prev.category : guessCat(d);
+      f.description = t.value;
+      if (!f.category && !f.mixed) f.category = prev ? prev.category : guessCat(d);
+      if (!touched.has('platform') && !f.platform) { const flat = d.replace(/\s/g, ''); f.platform = platAll().find(n => flat.includes(n.toLowerCase().replace(/\s/g, ''))) || (prev && prev.platform) || ''; }
       if (!existing && prev && !touched.has('splitType') && prev.splitType && prev.splitType !== 'custom') f.splitType = prev.splitType;
-      $$('[data-set]', body).forEach(b => { const k = b.dataset.set; if (k === 'category' || k === 'splitType') b.classList.toggle('on', f[k] === b.dataset.val); });
-      upd();
+      setTimeout(softDraw, 120);     // after any tap that caused the blur has been handled
     }
   };
-  body.onkeydown = ev => { if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') { ev.preventDefault(); save(false); } };
+  body.onkeydown = ev => {
+    if (ev.key !== 'Enter' || ev.target.tagName !== 'INPUT') return;
+    ev.preventDefault();
+    if (ev.target.id === 'fPlatQ') { const first = $('#fPlatRes [data-plat], #fPlatRes [data-platnew]', body); if (first) first.click(); return; }
+    save(false);
+  };
   draw();
   if (!existing) setTimeout(() => { const a = $('#fAmt', body); a && a.focus(); }, 60);
 }
@@ -888,6 +1061,40 @@ function openSettle(preIds) {
       c.forEach(e => mutate('Expenses', { ...e, settledBy: sid }, true));
       closeSheet(); render(); toast(`Settled ${c.length} expense${c.length > 1 ? 's' : ''}`);
     }
+  };
+  refresh();
+}
+
+/* one friend: what they owe, tick what they have paid back, share a statement */
+function friendStatement(id) {
+  const d = friendDues().filter(x => x.id === id).sort((a, b) => a.e.date.localeCompare(b.e.date)); if (!d.length) return '';
+  const tot = round2(d.reduce((s, x) => s + x.amount, 0)), by = {};
+  d.forEach(x => (by[x.e.paidBy] = round2((by[x.e.paidBy] || 0) + x.amount)));
+  return [`Hi ${friendName(id)}, here is what is pending:`, '', ...d.map(x => `• ${niceDate(x.e.date)} · ${x.e.description}: ${money(x.amount)} (your part of ${money(x.e.amount)}, paid by ${uname(x.e.paidBy)})`), '', `Total: ${money(tot)}`,
+    ...Object.keys(by).map(u => `Pay ${uname(u)}: ${money(by[u])}`)].join('\n');
+}
+function openFriend(id) {
+  const fr = friendsAll().find(x => x.id === id); if (!fr) return;
+  const items = friendDues().filter(x => x.id === id).sort((a, b) => b.e.date.localeCompare(a.e.date));
+  const sel = new Set(items.map(x => x.e.id)), me = meId();
+  const tot = l => round2(l.reduce((s, x) => s + x.amount, 0));
+  const body = openSheet(fr.name, `
+    <div class="card hero" style="margin-bottom:10px"><h3>${esc(fr.name)} owes</h3><div class="big">${money(tot(items))}</div><div class="sub">${money(tot(items.filter(x => x.e.paidBy === me)))} to you · ${money(tot(items.filter(x => x.e.paidBy !== me)))} to ${esc(uname(otherId()))}</div></div>
+    ${items.length ? `<p class="hint">Tick what ${esc(fr.name)} has paid back.</p><div class="list">${items.map(x => `<button type="button" class="row srow on" data-tog="${esc(x.e.id)}"><span class="chk"></span><span class="rmain"><b>${esc(x.e.description)}</b><small>${niceDate(x.e.date)} · ${esc(you(x.e.paidBy))} paid ${money(x.e.amount)}</small></span><span class="ramt"><b>${money(x.amount)}</b></span></button>`).join('')}</div>` : '<div class="empty"><b>✅</b>Nothing pending.</div>'}
+    <div class="stick">${items.length ? '<button class="btn primary block" data-recv="1" id="frBtn"></button><button class="btn block" data-stmt="1" style="margin-top:8px">Share statement</button>' : ''}
+    <div class="rowflex" style="margin-top:8px"><button class="btn grow" data-ren="1">Rename</button><button class="btn danger grow" data-rm="1">Remove</button></div></div>`);
+  const refresh = () => { const b = $('#frBtn', body); if (!b) return; const c = items.filter(x => sel.has(x.e.id)); $$('[data-tog]', body).forEach(r => r.classList.toggle('on', sel.has(r.dataset.tog))); b.disabled = !c.length; b.textContent = c.length ? `Mark ${money(tot(c))} received` : 'Select items'; };
+  body.onclick = ev => {
+    const t = ev.target.closest('[data-tog]');
+    if (t) { sel.has(t.dataset.tog) ? sel.delete(t.dataset.tog) : sel.add(t.dataset.tog); return refresh(); }
+    if (ev.target.closest('[data-recv]')) {
+      const c = items.filter(x => sel.has(x.e.id));
+      c.forEach(x => mutate('Expenses', { ...x.e, friends: x.e.friends.map(p => (p.id === id ? { ...p, settled: today() } : p)) }, true));
+      closeSheet(); render(); return toast(`${money(tot(c))} from ${fr.name} marked received`);
+    }
+    if (ev.target.closest('[data-stmt]')) return share(friendStatement(id), 'Statement copied');
+    if (ev.target.closest('[data-ren]')) { const name = (prompt('Name', fr.name) || '').trim().slice(0, 30); if (name) { setSetting('friends', friendsAll().map(x => (x.id === id ? { ...x, name } : x))); closeSheet(); render(); } return; }
+    if (ev.target.closest('[data-rm]')) { if (items.length) return toast('Clear their pending items first'); setSetting('friends', friendsAll().map(x => (x.id === id ? { ...x, archived: true } : x))); closeSheet(); render(); }
   };
   refresh();
 }
@@ -968,8 +1175,15 @@ const A = {
   edit: el => { const e = state.expenses.find(x => x.id === el.dataset.id); e && openExpense(e); },
   editSettle: el => { const e = state.expenses.find(x => x.id === el.dataset.id); e && openSettlement(e); },
   settle: () => openSettle(),
+  friend: el => openFriend(el.dataset.id),
+  addFriend: () => { const name = (prompt('Friend\'s name') || '').trim().slice(0, 30); if (name) { setSetting('friends', [...friendsAll(), { id: 'f' + uid(), name }]); render(); } },
+  shareList() {
+    const list = expFiltered().filter(e => e.type !== 'settlement'), q = ui.filter.q.trim(); if (!list.length) return toast('Nothing to share');
+    const lines = list.slice(0, 100).map(e => `${niceDate(e.date)} · ${e.description}: ${money(e.amount)} (${uname(e.paidBy)}${e.friendsShare ? ', friends ' + money(e.friendsShare) : ''})`);
+    share([`Tandem · ${q ? 'Search “' + q + '”' : monthName(ui.month)}`, '', ...lines, list.length > 100 ? `…and ${list.length - 100} more` : '', '', `Total: ${money(list.reduce((s, e) => s + e.amount, 0))} · ${uname('u1')}'s share ${money(list.reduce((s, e) => s + e.share1, 0))} · ${uname('u2')}'s share ${money(list.reduce((s, e) => s + e.share2, 0))}`].filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n'), 'List copied');
+  },
   settleOld: () => openSettle(openItems().filter(e => monthOf(e.date) < monthOf(today())).map(e => e.id)),
-  quick: el => { const e = state.expenses.find(x => x.id === el.dataset.id); if (e) openExpense(null, { description: e.description, category: e.category, splitType: e.splitType === 'custom' ? 'shared' : e.splitType }); },
+  quick: el => { const e = state.expenses.find(x => x.id === el.dataset.id); if (e) openExpense(null, { description: e.description, category: e.category, platform: e.platform || '', splitType: e.splitType === 'custom' ? 'shared' : e.splitType }); },
   monthlyEmail: el => { setSetting('monthlyEmail', !!el.dataset.v); render(); },
   async shareSummary() {
     const ym = ui.month, st = stats(ym), bal = balance(), me = meId(), ot = otherId();
@@ -987,6 +1201,8 @@ const A = {
   editRec: el => openRec(state.recurring.find(r => r.id === el.dataset.id)),
   markPaid: el => { const c = state.cards.find(x => x.id === el.dataset.id); if (!c) return; const i = cardInfo(c); mutate('BillPayments', { id: c.id + '_' + i.stmt, cardId: c.id, cycle: i.stmt, paidOn: today(), paidBy: meId(), deleted: false }); toast('Marked as paid'); },
   unmarkPaid: el => { const c = state.cards.find(x => x.id === el.dataset.id); if (!c) return; const i = cardInfo(c); mutate('BillPayments', { id: c.id + '_' + i.stmt, cardId: c.id, cycle: i.stmt, deleted: true }); },
+  addPlat: () => { const n = (prompt('Platform name') || '').trim().slice(0, 24); if (n && !S.platforms.includes(n)) { setSetting('platforms', [...S.platforms, n]); render(); } },
+  delPlat: el => { setSetting('platforms', S.platforms.filter(n => n !== el.dataset.n)); render(); },
   addCat: () => { setSetting('categories', [...S.cats, { id: 'c' + uid(), name: 'New category', emoji: '🏷️' }]); render(); },
   delCat: el => { if (S.activeCats.length <= 1) return; setSetting('categories', S.cats.map(c => c.id === el.dataset.id ? { ...c, archived: true } : c)); render(); },
   async saveProfile() {
@@ -1017,9 +1233,9 @@ const A = {
   resetDevice() { if (!confirm('Remove all Tandem data from this device? Your Google Sheet is not touched.')) return; Object.values(K).forEach(store.del); location.hash = ''; location.reload(); },
   install() { if (installEvt) { installEvt.prompt(); installEvt = null; } },
   exportCsv() {
-    const head = ['date', 'description', 'category', 'amount', 'paid_by', 'mode', 'card', uname('u1') + '_share', uname('u2') + '_share', 'type', 'settled', 'notes'];
+    const head = ['date', 'description', 'category', 'amount', 'paid_by', 'mode', 'card', uname('u1') + '_share', uname('u2') + '_share', 'friends_share', 'friends', 'platform', 'ordered_from', 'category_split', 'added_by', 'type', 'settled', 'notes'];
     const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const rows = live().sort((a, b) => a.date.localeCompare(b.date)).map(e => [e.date, e.description, cat(e.category).name, e.amount, uname(e.paidBy), modeLabel(e.mode), (state.cards.find(c => c.id === e.cardId) || {}).name || '', e.share1, e.share2, e.type, e.settledBy ? 'yes' : '', e.notes].map(q).join(','));
+    const rows = live().sort((a, b) => a.date.localeCompare(b.date)).map(e => [e.date, e.description, cat(e.category).name, e.amount, uname(e.paidBy), modeLabel(e.mode), (state.cards.find(c => c.id === e.cardId) || {}).name || '', e.share1, e.share2, e.friendsShare || 0, (e.friends || []).map(p => friendName(p.id) + ' ' + p.amount + (p.settled ? ' (paid)' : '')).join('; '), e.platform || '', e.platform ? DEVICES[e.device] || DEVICES.primary : '', (e.cats || []).map(c => cat(c.id).name + ' ' + c.amount).join('; '), e.createdBy ? uname(e.createdBy) : '', e.type, e.settledBy ? 'yes' : '', e.notes].map(q).join(','));
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['﻿' + head.map(q).join(',') + '\n' + rows.join('\n')], { type: 'text/csv' }));
     a.download = `tandem-expenses-${today()}.csv`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);

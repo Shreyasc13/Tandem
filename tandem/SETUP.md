@@ -66,6 +66,10 @@ Cloudflare Pages or Netlify (drag-and-drop the `app` folder) work just as well.
 - **Reminders:** every morning the script emails the card owner the day after a bill is generated, then N days before the due date (default 3), 1 day before, and on the day — until you tap **Mark paid**. Use **Settings → Send test email** to check it works. Device notifications also appear when you open the app, if you turn them on.
 - **Faster entry:** type sums in the amount box (`250+180`, or tap **+**), tap a quick-add chip on Home for things you log often, or long-press the app icon → **Add expense**. On a computer, press `n` to add and `/` to search.
 - **Uneven splits:** Split → Custom → *By items* (what was only yours / only theirs, the rest shared), *Exact amounts*, or *Percent*.
+- **Friends:** on any expense, pick friends under *Friends in on this?* (equal with everyone, or enter amounts). Their part is kept out of your spending and is owed to whoever paid. More → Friends shows who owes what, lets you tick what they have paid back, and shares a statement to send them.
+- **Platforms:** tag an expense with where it was ordered (Amazon, Swiggy, Zepto…) and whether it was the primary or office phone. Typing the platform's name in the description picks it automatically. Edit the list under More → Categories.
+- **Mixed orders:** tap *Mixed* under Category, then pick any categories and the amount for each (add as many rows as you need).
+- **On someone's behalf:** switch *Paid by* to your partner; it counts as their payment and is marked as added by you.
 - **Monthly email:** on the 1st, both of you get last month's totals and what is still open to settle (turn off in Settings).
 - **Recurring:** rent, subscriptions and so on are added automatically on their day each month, the next time either of you opens the app.
 
