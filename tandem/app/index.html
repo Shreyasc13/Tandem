@@ -109,6 +109,9 @@ nav.bottom .fab svg{width:26px;height:26px;stroke-width:2.4}
 .srow.on .chk{background:var(--accent);border-color:var(--accent)}.srow.on .chk::after{content:'✓'}.srow:not(.on){opacity:.55}
 .mhead{background:none;cursor:pointer}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+#toast.act.show{pointer-events:auto}#toast button{margin-left:12px;color:inherit;font-weight:800;text-decoration:underline}
+.hscroll{display:flex;gap:8px;overflow-x:auto;padding:2px 0 12px;scrollbar-width:none}.hscroll::-webkit-scrollbar{display:none}.hscroll .chip{background:var(--surface);box-shadow:var(--shadow)}
+.plus{width:40px;height:40px;border-radius:50%;background:var(--surface2);font-size:22px;font-weight:600;align-self:center;flex:none}
 .x{width:34px;height:34px;border-radius:50%;background:var(--surface2);font-size:18px}
 #toast{position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:99px;font-size:14px;font-weight:600;z-index:40;opacity:0;pointer-events:none;transition:opacity .2s;white-space:nowrap;max-width:90vw;overflow:hidden;text-overflow:ellipsis}
 #toast.show{opacity:1}
@@ -201,6 +204,30 @@ const dayLabel = s => { const t = today(); if (s === t) return 'Today'; if (s ==
 const niceDate = s => parseD(s).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
 const round2 = v => Math.round(v * 100) / 100;
 const num = v => { const x = parseFloat(String(v).replace(/,/g, '')); return isFinite(x) ? x : 0; };
+/** "250+180" or "3*120" typed in the amount box */
+function calc(v) {
+  const s = String(v ?? '').replace(/,/g, '').replace(/[x×]/gi, '*').replace(/\s/g, '');
+  if (!/^[\d.+\-*\/]+$/.test(s)) return num(v);
+  let total = 0;
+  for (const term of s.match(/[+\-]?[^+\-]+/g) || []) {
+    const parts = term.replace(/^[+\-]/, '').split(/([*\/])/); let p = parseFloat(parts[0]);
+    for (let i = 1; i < parts.length; i += 2) { const q = parseFloat(parts[i + 1]); p = parts[i] === '*' ? p * q : p / q; }
+    if (!isFinite(p)) return num(v);
+    total += (term[0] === '-' ? -1 : 1) * p;
+  }
+  return isFinite(total) ? round2(total) : 0;
+}
+const KEYWORDS = [
+  [/zomato|swiggy|restaurant|cafe|coffee|chai|dinner|lunch|breakfast|pizza|biryani|burger|bakery/, 'dining'],
+  [/big ?basket|blinkit|zepto|instamart|grocer|vegetable|fruit|milk|supermarket|d-?mart/, 'groceries'],
+  [/uber|ola|rapido|auto|metro|bus|cab|taxi|parking|toll/, 'transport'], [/petrol|diesel|fuel/, 'fuel'],
+  [/netflix|prime|spotify|hotstar|youtube|subscription|icloud/, 'subscriptions'],
+  [/electric|water bill|wi-?fi|broadband|recharge|gas|internet|mobile bill|maintenance/, 'utilities'],
+  [/amazon|flipkart|myntra|ajio|clothes|shoes/, 'shopping'], [/pharmacy|medic|doctor|hospital|clinic|lab test/, 'health'],
+  [/movie|pvr|inox|concert|game/, 'entertainment'], [/flight|hotel|train|irctc|airbnb|trip/, 'travel'],
+  [/\brent\b/, 'rent'], [/\bvet\b|cat food|dog food|litter|pet/, 'pets'], [/gift|birthday|wedding/, 'gifts']
+];
+const guessCat = d => { const k = KEYWORDS.find(k => k[0].test(d)); return k && S.activeCats.some(c => c.id === k[1]) ? k[1] : ''; };
 const nf = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2 });
 const nf0 = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
 
@@ -313,12 +340,16 @@ async function sync() {
   try {
     const res = await api('sync', { token: session.token, ops: sending });
     queue = queue.slice(sending.length); saveQueue();
+    const had = new Set(state.expenses.map(e => e.id)), firstSync = !meta.synced;
     state = norm(res.data);
     if (res.data.sheetUrl) { meta.sheetUrl = res.data.sheetUrl; store.set(K.meta, meta); }
     queue.forEach(applyLocal);
     saveState(); lastSync = Date.now(); syncErr = null;
     runRecurring();
     render(true); notifyCards();
+    const fresh = state.expenses.filter(e => !had.has(e.id) && !e.deleted && e.createdBy && e.createdBy !== meId());
+    if (!meta.synced) { meta.synced = true; store.set(K.meta, meta); }
+    if (!firstSync && fresh.length) toast(`${uname(otherId())} added ${fresh.length === 1 ? (fresh[0].type === 'settlement' ? 'a settlement' : '“' + fresh[0].description + '” ' + money(fresh[0].amount)) : fresh.length + ' entries'}`);
   } catch (err) {
     syncErr = err;
     if (err.code === 'auth') { session = null; store.del(K.session); toast('Please sign in again'); boot(); }
@@ -431,7 +462,11 @@ function runRecurring() {
 
 /* ───────────────────────── ui plumbing ───────────────────────── */
 let toastT;
-function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2200); }
+function toast(msg, action) {
+  const t = $('#toast'); t.textContent = msg; t.classList.toggle('act', !!action);
+  if (action) { const b = document.createElement('button'); b.textContent = action.label; b.onclick = () => { t.classList.remove('show'); action.fn(); }; t.appendChild(b); }
+  t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), action ? 6000 : 2400);
+}
 function openSheet(title, html) {
   $('#sheet').innerHTML = `<div class="sheet" data-act="sheetBg"><div role="dialog" aria-label="${esc(title)}"><div class="shead"><h2>${esc(title)}</h2><button class="x" data-act="closeSheet" aria-label="Close">✕</button></div><div id="sbody">${html}</div></div></div>`;
   return $('#sbody');
@@ -468,6 +503,25 @@ function expRow(e) {
     <span class="rmain"><b>${esc(e.description || c.name)}</b><small>${esc(you(e.paidBy))} · ${esc(card ? card.name : modeLabel(e.mode))} · ${esc(c.name)}</small></span>
     <span class="ramt"><b>${money(e.amount)}</b>${tag}</span></button>`;
 }
+function quickList() {
+  const since = addDays(today(), -120), m = {};
+  for (const e of spends()) { if (e.date < since || e.recurringId) continue; const k = e.description.toLowerCase(); (m[k] = m[k] || { n: 0, e }).n++; if (e.createdAt > m[k].e.createdAt) m[k].e = e; }
+  return Object.values(m).filter(x => x.n >= 2).sort((a, b) => b.n - a.n).slice(0, 8).map(x => x.e);
+}
+function upcoming() {
+  const t = today(), [y, m] = t.split('-').map(Number), lim = addDays(t, 10), out = [];
+  for (const r of state.recurring) {
+    if (r.deleted || !r.active) continue;
+    let dt = dayOn(y, m, r.dayOfMonth); if (dt <= t) dt = shiftCycle(dt, r.dayOfMonth, 1);
+    if (dt <= lim) out.push({ date: dt, icon: cat(r.category).emoji, title: r.description, sub: `${you(r.paidBy)} · recurring`, amt: r.amount });
+  }
+  for (const c of liveCards()) {
+    const i = cardInfo(c);
+    if (i.next <= lim && i.unbilled > 0) out.push({ date: i.next, icon: '🧾', title: `${c.name} bill generates`, sub: you(c.owner), amt: i.unbilled });
+    if (i.billed > 0 && !i.paid && i.daysToDue > S.remind && i.due <= lim) out.push({ date: i.due, icon: '💳', title: `${c.name} payment due`, sub: you(c.owner), amt: i.billed });
+  }
+  return out.sort((a, b) => a.date.localeCompare(b.date));
+}
 function budgetBar(spent, budget) {
   const p = budget ? spent / budget : 0;
   return `<div class="bar ${p > 1 ? 'over' : p > .85 ? 'near' : ''}"><i style="width:${Math.min(100, p * 100).toFixed(1)}%"></i></div>`;
@@ -481,15 +535,20 @@ const VIEWS = {
     const balText = !open.length ? ['All settled up', openTxt] : Math.abs(bal) < 0.005 ? ['You are even', openTxt + ' cancel out'] : bal > 0 ? [`${esc(uname(ot))} owes you`, openTxt] : [`You owe ${esc(uname(ot))}`, openTxt];
     const alerts = cardAlerts().map(a => `<div class="alert ${a.cls}"><span style="font-size:22px">${a.icon}</span><span class="grow"><b>${esc(a.title)}</b><small>${esc(a.text)} · ${esc(you(a.c.owner))}</small></span><button class="btn sm" data-act="markPaid" data-id="${esc(a.c.id)}">Mark paid</button></div>`).join('');
     const tb = Number(S.budgets._total) || 0;
+    const stale = open.filter(e => monthOf(e.date) < ym), staleNet = round2(stale.reduce((s, e) => s + lentOf(e), 0));
+    const nudge = stale.length ? `<div class="alert info"><span style="font-size:22px">🧮</span><span class="grow"><b>${stale.length} expense${stale.length > 1 ? 's' : ''} from earlier months still open</b><small>${staleNet > 0 ? esc(uname(ot)) + ' owes you ' + money(staleNet) : staleNet < 0 ? 'You owe ' + esc(uname(ot)) + ' ' + money(-staleNet) : 'They cancel out'}</small></span><button class="btn sm" data-act="settleOld">Settle</button></div>` : '';
+    const quick = quickList(), soon = upcoming();
     const [y, m, d] = today().split('-').map(Number);
     const recent = live().sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt).slice(0, 6);
-    return `${alerts}
+    return `${alerts}${nudge}
     <div class="card hero"><h3>${balText[0]}</h3><div class="rowflex between"><div><div class="big">${money(Math.abs(bal))}</div><div class="sub">${balText[1]}</div></div>
       ${open.length ? '<button class="btn" data-act="settle">Settle up</button>' : ''}</div></div>
+    ${quick.length ? `<div class="hscroll">${quick.map(e => `<button class="chip" data-act="quick" data-id="${esc(e.id)}">${esc(cat(e.category).emoji + ' ' + e.description)}</button>`).join('')}</div>` : ''}
     <div class="card"><h3>${esc(monthName(ym))}</h3>
       <div class="kpis"><div class="kpi"><small>Total spent</small><b>${money0(st.total)}</b></div><div class="kpi"><small>Your share</small><b>${money0(st.mine)}</b></div><div class="kpi"><small>${esc(uname(ot))}'s share</small><b>${money0(st.theirs)}</b></div></div>
       ${tb ? `<div style="margin-top:14px"><div class="rowflex between" style="font-size:13px;margin-bottom:6px"><span class="muted">Budget</span><span><b>${money0(st.total)}</b> of ${money0(tb)}</span></div>${budgetBar(st.total, tb)}<div class="hint">${st.total > tb ? `Over by ${money0(st.total - tb)}` : `${money0((tb - st.total) / Math.max(1, dim(y, m) - d + 1))}/day left for ${dim(y, m) - d + 1} days`}</div></div>` : ''}
     </div>
+    ${soon.length ? `<div class="card"><h3>Coming up</h3><div class="list">${soon.map(u => `<div class="row"><span class="ico">${esc(u.icon)}</span><span class="rmain"><b>${esc(u.title)}</b><small>${esc(dayLabel(u.date))} · ${esc(u.sub)}</small></span><span class="ramt"><b>${money(u.amt)}</b></span></div>`).join('')}</div></div>` : ''}
     <div class="card"><div class="rowflex between"><h3>Recent</h3><button class="btn sm" data-act="nav" data-v="expenses" style="margin-top:-8px">See all</button></div>
       ${recent.length ? `<div class="list">${recent.map(expRow).join('')}</div>` : '<div class="empty"><b>🧾</b>No expenses yet.<br>Tap <b style="display:inline;font-size:inherit">+</b> to add your first one.</div>'}
     </div>`;
@@ -510,6 +569,8 @@ const VIEWS = {
     const ym = ui.month, st = stats(ym, ui.basis), me = meId(), ot = otherId();
     const [y, m] = ym.split('-').map(Number), days = dim(y, m), isCur = ym === monthOf(today());
     const elapsed = isCur ? Number(today().slice(8)) : days;
+    const pm = addMonth(ym, -1), pTo = Object.entries(stats(pm, ui.basis).byDay).filter(([d]) => Number(d.slice(8)) <= elapsed).reduce((s, x) => s + x[1], 0);
+    const delta = pTo ? (st.sum - pTo) / pTo * 100 : null;
     const cats = Object.entries(st.byCat).sort((a, b) => b[1] - a[1]);
     let top = cats.slice(0, 7).map(([id, v], i) => ({ id, label: cat(id).emoji + ' ' + cat(id).name, v, color: PALETTE[i] }));
     const rest = cats.slice(7).reduce((s, c) => s + c[1], 0);
@@ -528,7 +589,8 @@ const VIEWS = {
     return `<div class="monthnav"><button data-act="month" data-n="-1" aria-label="Previous month">‹</button><b>${esc(monthName(ym))}</b><button data-act="month" data-n="1" aria-label="Next month">›</button></div>
     <div class="seg" style="margin-bottom:12px"><button class="${ui.basis === 'all' ? 'on' : ''}" data-act="basis" data-b="all">Household</button><button class="${ui.basis === 'mine' ? 'on' : ''}" data-act="basis" data-b="mine">My share</button></div>
     ${!st.list.length ? '<div class="card empty"><b>📊</b>Nothing logged this month yet.</div>' : `
-    <div class="card"><div class="kpis"><div class="kpi"><small>${ui.basis === 'mine' ? 'My spend' : 'Total spend'}</small><b>${money0(st.sum)}</b></div><div class="kpi"><small>Per day</small><b>${money0(st.sum / elapsed)}</b></div><div class="kpi"><small>Entries</small><b>${st.list.length}</b></div></div></div>
+    <div class="card"><div class="kpis"><div class="kpi"><small>${ui.basis === 'mine' ? 'My spend' : 'Total spend'}</small><b>${money0(st.sum)}</b></div><div class="kpi"><small>Per day</small><b>${money0(st.sum / elapsed)}</b></div><div class="kpi"><small>Entries</small><b>${st.list.length}</b></div></div>
+      ${delta == null ? '' : `<p class="hint"><b class="${delta > 0 ? 'neg' : 'pos'}">${delta > 0 ? '▲' : '▼'} ${Math.abs(delta).toFixed(0)}% ${delta > 0 ? 'more' : 'less'}</b> than ${isCur ? 'the same point in ' : ''}${esc(monthName(pm))} (${money0(pTo)})</p>`}</div>
     <div class="grid2">
       <div class="card"><h3>By category</h3><div class="donutwrap"><div class="donut"><svg viewBox="0 0 120 120" role="img" aria-label="Spend by category">${segs}</svg><div class="mid"><span><b>${moneyShort(st.sum)}</b>total</span></div></div>
         <div class="legend">${top.map(t => `<div class="lg"><i style="background:${t.color}"></i><span>${esc(t.label)}</span><b>${money0(t.v)}</b><em>${(t.v / st.sum * 100).toFixed(0)}%</em></div>`).join('')}</div></div></div>
@@ -545,7 +607,8 @@ const VIEWS = {
       <div class="rowflex between" style="font-size:13px;margin:12px 0 6px"><span>Your share <b>${money0(st.mine)}</b></span><span>${esc(uname(ot))}'s share <b>${money0(st.theirs)}</b></span></div>
       <div class="split2"><i style="width:${(st.mine / (st.total || 1) * 100).toFixed(1)}%;background:${esc(ucolor(me))}"></i><i style="flex:1;background:${esc(ucolor(ot))}"></i></div></div>
     ${budCats.length ? `<div class="card"><h3>Budgets (household)</h3>${budCats.map(c => { const sp = stats(ym, 'all').byCat[c.id] || 0, b = Number(bud[c.id]); return `<div style="margin-bottom:12px"><div class="rowflex between" style="font-size:13.5px;margin-bottom:5px"><span>${esc(c.emoji + ' ' + c.name)}</span><span class="${sp > b ? 'neg' : ''}"><b>${money0(sp)}</b> / ${money0(b)}</span></div>${budgetBar(sp, b)}</div>`; }).join('')}</div>` : ''}
-    <div class="card"><h3>Biggest expenses</h3><div class="list">${big.map(expRow).join('')}</div></div>`}`;
+    <div class="card"><h3>Biggest expenses</h3><div class="list">${big.map(expRow).join('')}</div></div>
+    <button class="btn block" data-act="shareSummary">Share this month's summary</button>`}`;
   },
 
   more() {
@@ -615,6 +678,7 @@ const VIEWS = {
       <div class="chips"><button class="btn sm" data-act="askNotify" ${np === 'granted' || np === 'unsupported' ? 'disabled' : ''}>${np === 'granted' ? 'Device notifications on ✓' : np === 'unsupported' ? 'Notifications not supported here' : 'Turn on device notifications'}</button>
       ${cfg.demo ? '' : '<button class="btn sm" data-act="testEmail">Send test email</button>'}</div>
       <p class="hint">Email reminders arrive even when the app is closed (bill generated, ${S.remind} days before, 1 day before, and on the due date). Device notifications appear when you open the app.</p></div>
+    ${cfg.demo ? '' : `<div class="card"><h3>Monthly summary email</h3><div class="seg"><button class="${state.settings.monthlyEmail === false ? '' : 'on'}" data-act="monthlyEmail" data-v="1">On</button><button class="${state.settings.monthlyEmail === false ? 'on' : ''}" data-act="monthlyEmail" data-v="">Off</button></div><p class="hint">On the 1st, each of you gets last month's totals, top categories and what is still open to settle.</p></div>`}
     <div class="card"><h3>Currency symbol</h3><input class="in" id="cur" value="${esc(S.cur)}" maxlength="4" style="max-width:120px"></div>
     ${cfg.demo ? '' : `<div class="card"><h3>Password</h3><label class="f"><span>Current password</span><input class="in" id="pwOld" type="password" autocomplete="current-password"></label><label class="f"><span>New password</span><input class="in" id="pwNew" type="password" autocomplete="new-password"></label><button class="btn" data-act="changePw">Change password</button></div>
     <div class="card"><h3>Partner & devices</h3><p class="hint" style="margin:0 0 10px">Send this link to your partner or open it on your other devices. It connects the app to your sheet; each person still signs in.</p><button class="btn" data-act="shareLink">Copy setup link</button></div>`}
@@ -661,7 +725,7 @@ function openExpense(existing, preset) {
     if (existing.splitType === 'shared' && Math.abs(d.share1 - existing.share1) > 0.01) { f.splitType = 'custom'; f.cm = 'amounts'; f.ex1 = existing.share1; }
   }
   if (!existing && f.mode === 'credit_card') f.cardId = prefs.lastCard || '';
-  const locked = !!(existing && existing.settledBy);
+  const locked = !!(existing && existing.settledBy), touched = new Set(Object.keys(preset || {}));
   const body = openSheet(existing ? 'Edit expense' : 'Add expense', '');
 
   const collect = () => {
@@ -674,14 +738,14 @@ function openExpense(existing, preset) {
     if (g('fEx1')) f.ex1 = g('fEx1').value;
   };
   /* uneven splits: by items (each person's own items + shared rest), exact amounts, or percent */
-  const shares = (a = num(f.amount)) => {
+  const shares = (a = calc(f.amount)) => {
     if (f.splitType !== 'custom' || f.cm === 'pct') return computeShares(a, f.paidBy, f.splitType, f.payerPct);
     if (f.cm === 'amounts') { const s1 = round2(Math.min(a, Math.max(0, num(f.ex1)))); return { share1: s1, share2: round2(a - s1) }; }
     const o1 = Math.max(0, num(f.own1)), o2 = Math.max(0, num(f.own2)), rest = Math.max(0, a - o1 - o2);
     const s1 = round2(Math.min(a, o1 + rest * S.split / 100)); return { share1: s1, share2: round2(a - s1) };
   };
   const summary = () => {
-    const a = num(f.amount), sh = shares(a), o = other(f.paidBy), owed = shareOf(sh, o);
+    const a = calc(f.amount), sh = shares(a), o = other(f.paidBy), owed = shareOf(sh, o);
     if (!a) return 'Enter an amount';
     if (!owed) return `${you(f.paidBy)} cover${f.paidBy === me ? '' : 's'} all of it — nothing to split`;
     return `${you(o)} owe${o === me ? '' : 's'} ${youL(f.paidBy)} <b>${money(owed)}</b> · ${youL(f.paidBy)} ${f.paidBy === me ? 'keep' : 'keeps'} ${money(shareOf(sh, f.paidBy))}`;
@@ -694,7 +758,7 @@ function openExpense(existing, preset) {
     const descs = [...new Set(spends().sort((a, b) => b.createdAt - a.createdAt).map(e => e.description).filter(Boolean))].slice(0, 60);
     const stl = locked && state.expenses.find(x => x.id === existing.settledBy);
     body.innerHTML = `${locked ? `<div class="alert info"><span style="font-size:20px">✅</span><span class="grow"><b>Settled${stl ? ' on ' + niceDate(stl.date) : ''}</b><small>Amount, payer and split are locked. Undo the settlement to change them.</small></span></div>` : ''}
-      <div class="amount"><span>${esc(S.cur)}</span><input id="fAmt" inputmode="decimal" placeholder="0" value="${esc(f.amount)}" autocomplete="off" ${locked ? 'readonly' : ''}></div>
+      <div class="amount"><span>${esc(S.cur)}</span><input id="fAmt" inputmode="decimal" placeholder="0" value="${esc(f.amount)}" autocomplete="off" ${locked ? 'readonly' : ''}>${locked ? '' : '<button type="button" class="plus" data-plus="1" aria-label="Add another amount">+</button>'}</div><p class="hint" id="fCalc" style="margin:-10px 0 12px"></p>
       <div class="fsec"><input class="in" id="fDesc" placeholder="What was it for?" value="${esc(f.description)}" list="descs" maxlength="80" autocomplete="off"><datalist id="descs">${descs.map(d => `<option value="${esc(d)}">`).join('')}</datalist></div>
       <div class="fsec"><span class="flabel">Category</span><div class="chips">${S.activeCats.map(c => chip(f.category === c.id, `data-set="category" data-val="${esc(c.id)}"`, esc(c.emoji + ' ' + c.name))).join('')}</div></div>
       <div class="fsec"><span class="flabel">Paid by</span><div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.paidBy === id ? 'on' : ''}" data-set="paidBy" data-val="${id}">${esc(you(id))}</button>`).join('')}</div></div>
@@ -718,16 +782,19 @@ function openExpense(existing, preset) {
   };
   const upd = () => {
     $('#fSum', body).innerHTML = summary();
+    $('#fCalc', body).textContent = /[+\-*x×\/]/.test(String(f.amount).slice(1)) ? `= ${money(calc(f.amount))}` : '';
     const l = $('#fPctL', body);
     if (l) l.textContent = `${you(f.paidBy)} ${f.payerPct}% · ${you(other(f.paidBy))} ${round2(100 - f.payerPct)}%`;
-    const a = num(f.amount), e2 = $('#fEx2', body), rest = $('#fRest', body);
+    const a = calc(f.amount), e2 = $('#fEx2', body), rest = $('#fRest', body);
     if (e2 && document.activeElement !== e2) e2.value = a ? round2(Math.max(0, a - num(f.ex1))) : '';
     if (rest) { const r = round2(a - num(f.own1) - num(f.own2)); rest.innerHTML = r < 0 ? '<span class="neg">These add up to more than the total.</span>' : `What each of you ordered just for yourself. The remaining <b>${money(Math.max(0, r))}</b> is shared ${S.split}/${100 - S.split}.`; }
   };
   const save = again => {
     collect();
-    const a = round2(num(f.amount));
+    const a = round2(calc(f.amount));
     if (!(a > 0)) { toast('Enter an amount'); $('#fAmt', body).focus(); return; }
+    const dup = !existing && spends().find(e => e.date === f.date && e.amount === a && e.id !== f.id);
+    if (dup && !confirm(`${you(dup.paidBy)} already logged ${money(a)} for “${dup.description}” on ${niceDate(dup.date)}.\n\nAdd this one as well?`)) return;
     if (!locked && f.splitType === 'custom' && ((f.cm === 'items' && num(f.own1) + num(f.own2) > a + 0.005) || (f.cm === 'amounts' && num(f.ex1) > a + 0.005))) return toast('The split adds up to more than the total');
     if (f.splitType === 'custom') prefs.lastCustom = f.cm;
     const category = f.category || 'other';
@@ -735,16 +802,23 @@ function openExpense(existing, preset) {
     if (locked) Object.assign(row, { amount: existing.amount, paidBy: existing.paidBy, splitType: existing.splitType, share1: existing.share1, share2: existing.share2 });
     prefs.lastMode = f.mode; prefs.lastSplit = f.splitType === 'custom' ? 'shared' : f.splitType; if (f.cardId) prefs.lastCard = f.cardId; savePrefs();
     mutate('Expenses', row);
-    toast(existing ? 'Updated' : `Saved ${money(a)}`);
+    let msg = existing ? 'Updated' : `Saved ${money(a)}`;
+    if (!existing && monthOf(row.date) === monthOf(today())) {
+      const st = stats(monthOf(row.date)), bud = S.budgets;
+      const chk = (spent, b, name) => { if (!b) return; if (spent - a < b && spent >= b) msg = `⚠️ ${name} budget crossed: ${money0(spent)} of ${money0(b)}`; else if (spent - a < b * .8 && spent >= b * .8) msg = `${name} budget is ${Math.round(spent / b * 100)}% used`; };
+      chk(st.byCat[category] || 0, Number(bud[category]), cat(category).name); chk(st.total, Number(bud._total), 'Monthly');
+    }
+    toast(msg);
     if (again) openExpense(null, { date: f.date, paidBy: f.paidBy }); else closeSheet();
   };
   body.onclick = ev => {
     const s = ev.target.closest('[data-set]');
-    if (s) { if (locked && /paidBy|splitType/.test(s.dataset.set)) return toast('Settled — undo the settlement to change this'); collect(); const was = shares(); f[s.dataset.set] = s.dataset.val; if (s.dataset.set === 'cm' && f.cm === 'amounts' && num(f.amount)) f.ex1 = was.share1; draw(); return; }
+    if (s) { if (locked && /paidBy|splitType/.test(s.dataset.set)) return toast('Settled — undo the settlement to change this'); collect(); touched.add(s.dataset.set); const was = shares(); f[s.dataset.set] = s.dataset.val; if (s.dataset.set === 'cm' && f.cm === 'amounts' && calc(f.amount)) f.ex1 = was.share1; draw(); return; }
+    if (ev.target.closest('[data-plus]')) { const i = $('#fAmt', body); if (i.value && !/[+\-*\/]$/.test(i.value)) i.value += '+'; f.amount = i.value; i.focus(); return upd(); }
     const sv = ev.target.closest('[data-save]');
     if (sv) return save(sv.dataset.save === 'again');
     if (ev.target.closest('[data-one]')) return openSettle([existing.id]);
-    if (ev.target.closest('[data-del]')) { if (locked) return toast('Settled — undo the settlement first'); if (confirm('Delete this expense?')) { mutate('Expenses', { ...existing, deleted: true }); closeSheet(); toast('Deleted'); } return; }
+    if (ev.target.closest('[data-del]')) { if (locked) return toast('Settled — undo the settlement first'); if (confirm('Delete this expense?')) { mutate('Expenses', { ...existing, deleted: true }); closeSheet(); toast('Deleted', { label: 'Undo', fn: () => mutate('Expenses', { ...existing, deleted: false }) }); } return; }
     if (ev.target.closest('[data-dup]')) { collect(); openExpense(null, { ...f, id: uid(), date: today(), recurringId: '', settledBy: '', createdAt: 0 }); }
   };
   body.oninput = ev => {
@@ -752,14 +826,18 @@ function openExpense(existing, preset) {
     if (ev.target.id === 'fPct') { f.payerPct = num(ev.target.value); upd(); }
     if (/^fOwn/.test(ev.target.id)) { collect(); upd(); }
     if (ev.target.id === 'fEx1') { f.ex1 = ev.target.value; upd(); }
-    if (ev.target.id === 'fEx2') { f.ex1 = round2(Math.max(0, num(f.amount) - num(ev.target.value))); $('#fEx1', body).value = f.ex1; upd(); }
+    if (ev.target.id === 'fEx2') { f.ex1 = round2(Math.max(0, calc(f.amount) - num(ev.target.value))); $('#fEx1', body).value = f.ex1; upd(); }
   };
   body.onchange = ev => {
     if (ev.target.id === 'fDate') { collect(); draw(); }
-    if (ev.target.id === 'fDesc' && !f.category) {
-      const d = ev.target.value.trim().toLowerCase();
-      const prev = d && spends().sort((a, b) => b.createdAt - a.createdAt).find(e => e.description.toLowerCase() === d);
-      if (prev) { collect(); f.category = prev.category; draw(); }
+    if (ev.target.id === 'fDesc') {       // learn from history, then from keywords; update chips in place so a tap in progress is not lost
+      const d = ev.target.value.trim().toLowerCase(); if (!d) return;
+      const prev = spends().sort((a, b) => b.createdAt - a.createdAt).find(e => e.description.toLowerCase() === d);
+      f.description = ev.target.value;
+      if (!f.category) f.category = prev ? prev.category : guessCat(d);
+      if (!existing && prev && !touched.has('splitType') && prev.splitType && prev.splitType !== 'custom') f.splitType = prev.splitType;
+      $$('[data-set]', body).forEach(b => { const k = b.dataset.set; if (k === 'category' || k === 'splitType') b.classList.toggle('on', f[k] === b.dataset.val); });
+      upd();
     }
   };
   body.onkeydown = ev => { if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') { ev.preventDefault(); save(false); } };
@@ -890,6 +968,16 @@ const A = {
   edit: el => { const e = state.expenses.find(x => x.id === el.dataset.id); e && openExpense(e); },
   editSettle: el => { const e = state.expenses.find(x => x.id === el.dataset.id); e && openSettlement(e); },
   settle: () => openSettle(),
+  settleOld: () => openSettle(openItems().filter(e => monthOf(e.date) < monthOf(today())).map(e => e.id)),
+  quick: el => { const e = state.expenses.find(x => x.id === el.dataset.id); if (e) openExpense(null, { description: e.description, category: e.category, splitType: e.splitType === 'custom' ? 'shared' : e.splitType }); },
+  monthlyEmail: el => { setSetting('monthlyEmail', !!el.dataset.v); render(); },
+  async shareSummary() {
+    const ym = ui.month, st = stats(ym), bal = balance(), me = meId(), ot = otherId();
+    const cats = Object.entries(st.byCat).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id, v]) => `${cat(id).emoji} ${cat(id).name}: ${money0(v)}`);
+    const text = [`Tandem · ${monthName(ym)}`, `Total spent: ${money0(st.total)}`, `${uname(me)}'s share: ${money0(st.mine)} · ${uname(ot)}'s share: ${money0(st.theirs)}`, `${uname(me)} paid ${money0(st.paidMe)} · ${uname(ot)} paid ${money0(st.paidOther)}`, '', ...cats, '',
+      Math.abs(bal) < 0.005 ? 'All settled up ✅' : `Still open: ${bal > 0 ? uname(ot) + ' owes ' + uname(me) : uname(me) + ' owes ' + uname(ot)} ${money(Math.abs(bal))}`].join('\n');
+    try { if (navigator.share) await navigator.share({ text }); else { await navigator.clipboard.writeText(text); toast('Summary copied'); } } catch { try { await navigator.clipboard.writeText(text); toast('Summary copied'); } catch {} }
+  },
   closeSheet,
   sheetBg: (el, ev) => { if (ev.target === el) closeSheet(); },
   syncNow: () => { if (cfg.demo) return toast('Demo mode — data stays on this device'); if (!navigator.onLine) return toast('You are offline — changes are saved and will sync'); sync().then(() => toast(syncErr ? syncErr.message : 'Synced')); },
@@ -956,7 +1044,12 @@ document.addEventListener('change', ev => {
   if (t.id === 'remind') { setSetting('reminderDays', Math.min(15, Math.max(1, Math.round(num(t.value)) || 3))); toast('Saved'); }
   if (t.id === 'cur') { setSetting('currency', t.value.trim() || '₹'); toast('Saved'); }
 });
-document.addEventListener('keydown', ev => { if (ev.key === 'Escape') closeSheet(); });
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') return closeSheet();
+  if (!session || $('#sheet').innerHTML || /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName) || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  if (ev.key === 'n') { ev.preventDefault(); openExpense(); }
+  if (ev.key === '/') { ev.preventDefault(); go('expenses'); setTimeout(() => { const q = $('#q'); q && q.focus(); }, 50); }
+});
 
 /* ───────────────────────── sign-in & setup ───────────────────────── */
 const LOGO = '<img class="logo" src="icon-192.png" alt="">';
@@ -1040,6 +1133,7 @@ function route() {
   const v = location.hash.replace(/^#\/?/, '');
   ui.view = VIEWS[v] ? v : 'home';
   if (session) { closeSheet(); render(); window.scrollTo(0, 0); }
+  if (v === 'add') { history.replaceState(null, '', location.pathname + '#/home'); if (session) openExpense(); }
 }
 function startApp() {
   route();

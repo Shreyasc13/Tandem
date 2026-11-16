@@ -348,6 +348,7 @@ function money_(v) {
 
 /** Runs every morning (installed by setup). Emails each card owner when a bill is generated and before it is due. */
 function dailyReminders() {
+  try { monthlySummary_(); } catch (err) { Logger.log(err); }
   var remind = Number(setting_('reminderDays', 3)) || 3;
   var users = {};
   read_('Users').forEach(function (u) { users[u.id] = u; });
@@ -368,6 +369,42 @@ function dailyReminders() {
     }
     if (subject) MailApp.sendEmail(owner.email, subject, body + '\n\n— Tandem');
   });
+}
+
+/** On the 1st: last month's totals, top categories and what is still open. Called from dailyReminders. */
+function monthlySummary_() {
+  if (setting_('monthlyEmail', true) === false) return;
+  var tz = Session.getScriptTimeZone(), now = new Date();
+  if (Utilities.formatDate(now, tz, 'd') !== '1') return;
+  var prev = new Date(now.getTime() - 5 * 864e5);
+  var ym = Utilities.formatDate(prev, tz, 'yyyy-MM'), label = Utilities.formatDate(prev, tz, 'MMMM yyyy');
+  var users = read_('Users');
+  var names = {}; users.forEach(function (u) { names[u.id] = u.name; });
+  var catNames = {}; (setting_('categories', []) || []).forEach(function (c) { catNames[c.id] = (c.emoji ? c.emoji + ' ' : '') + c.name; });
+  var total = 0, share = { u1: 0, u2: 0 }, paid = { u1: 0, u2: 0 }, cats = {}, open = 0, openN = 0;
+  read_('Expenses').forEach(function (e) {
+    if (truthy_(e.deleted) || String(e.type) === 'settlement') return;
+    var amt = Number(e.amount) || 0, s1 = Number(e.share1) || 0, s2 = Number(e.share2) || 0;
+    if (!e.settledBy) {                     // positive = u2 owes u1
+      var lent = String(e.paidBy) === 'u1' ? s2 : -s1;
+      if (lent) { open += lent; openN++; }
+    }
+    if (String(e.date).slice(0, 7) !== ym) return;
+    total += amt; share.u1 += s1; share.u2 += s2;
+    paid[e.paidBy] = (paid[e.paidBy] || 0) + amt;
+    cats[e.category] = (cats[e.category] || 0) + amt;
+  });
+  if (!total && !openN) return;
+  var top = Object.keys(cats).sort(function (a, b) { return cats[b] - cats[a]; }).slice(0, 5)
+    .map(function (id) { return '  ' + (catNames[id] || (String(id).charAt(0).toUpperCase() + String(id).slice(1)) || 'Other') + ': ' + money_(cats[id]); });
+  var n1 = names.u1 || 'Person 1', n2 = names.u2 || 'Person 2';
+  var openLine = !openN ? 'All settled up.' : Math.abs(open) < 0.005 ? openN + ' open expenses that cancel out.' :
+    openN + ' open expense' + (openN === 1 ? '' : 's') + ': ' + (open > 0 ? n2 + ' owes ' + n1 : n1 + ' owes ' + n2) + ' ' + money_(Math.abs(open)) + '.';
+  var body = 'Tandem summary for ' + label + '\n\nTotal spent: ' + money_(total) +
+    '\n' + n1 + ': paid ' + money_(paid.u1 || 0) + ', share ' + money_(share.u1) +
+    '\n' + n2 + ': paid ' + money_(paid.u2 || 0) + ', share ' + money_(share.u2) +
+    (top.length ? '\n\nTop categories:\n' + top.join('\n') : '') + '\n\nTo settle: ' + openLine + '\n\n— Tandem';
+  users.forEach(function (u) { if (u.email) MailApp.sendEmail(u.email, '📊 Tandem: ' + label + ' summary', body); });
 }
 
 function testEmail_(me) {

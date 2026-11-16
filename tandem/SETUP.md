@@ -64,6 +64,9 @@ Cloudflare Pages or Netlify (drag-and-drop the `app` folder) work just as well.
 - **Settling up:** the balance is the sum of *open* shared expenses. Settle up lists them with tick boxes (everything, one month, or just a few). Recording the payment marks exactly those as settled (`settledBy` column in the sheet). Tap a settlement later to see what it covered or to undo it.
 - **Credit cards:** add each card with the day the bill is generated and the day payment is due. Tandem totals what you logged in each billing cycle.
 - **Reminders:** every morning the script emails the card owner the day after a bill is generated, then N days before the due date (default 3), 1 day before, and on the day — until you tap **Mark paid**. Use **Settings → Send test email** to check it works. Device notifications also appear when you open the app, if you turn them on.
+- **Faster entry:** type sums in the amount box (`250+180`, or tap **+**), tap a quick-add chip on Home for things you log often, or long-press the app icon → **Add expense**. On a computer, press `n` to add and `/` to search.
+- **Uneven splits:** Split → Custom → *By items* (what was only yours / only theirs, the rest shared), *Exact amounts*, or *Percent*.
+- **Monthly email:** on the 1st, both of you get last month's totals and what is still open to settle (turn off in Settings).
 - **Recurring:** rent, subscriptions and so on are added automatically on their day each month, the next time either of you opens the app.
 
 ## Updating later

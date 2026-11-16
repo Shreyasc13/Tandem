@@ -14,6 +14,7 @@
     { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ],
   "shortcuts": [
+    { "name": "Add expense", "url": "./#/add" },
     { "name": "Expenses", "url": "./#/expenses" },
     { "name": "Credit cards", "url": "./#/cards" }
   ]
