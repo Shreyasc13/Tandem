@@ -1,5 +1,5 @@
 /* Tandem service worker: makes the app open instantly and work offline. */
-const CACHE = 'tandem-v8';
+const CACHE = 'tandem-v14';
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
@@ -33,10 +33,11 @@ self.addEventListener('fetch', e => {
 
 self.addEventListener('notificationclick', e => {
   e.notification.close();
+  const ask = (e.notification.data || {}).ask, action = e.action || 'open';
   e.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
-      for (const c of list) if ('focus' in c) return c.focus();
-      return self.clients.openWindow('./#/cards');
+      for (const c of list) if ('focus' in c) { if (ask) c.postMessage({ ask, action }); return c.focus(); }
+      return self.clients.openWindow(ask ? './#/ask/' + ask + '/' + action : './#/cards');
     })
   );
 });

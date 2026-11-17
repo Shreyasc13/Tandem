@@ -11,16 +11,17 @@
 var APP = 'Tandem';
 
 var SCHEMA = {
-  Users: ['id', 'name', 'email', 'color', 'salt', 'passHash', 'createdAt'],
+  Users: ['id', 'name', 'email', 'color', 'salt', 'passHash', 'createdAt', 'quickKey', 'googleEmail'],
   Expenses: ['id', 'type', 'date', 'amount', 'description', 'category', 'paidBy', 'mode', 'cardId',
-    'splitType', 'splitInfo', 'share1', 'share2', 'friendsShare', 'friends', 'platform', 'device', 'cats', 'notes', 'recurringId', 'settledBy', 'createdBy', 'createdAt', 'updatedAt', 'deleted'],
+    'splitType', 'splitInfo', 'share1', 'share2', 'friendsShare', 'friends', 'platform', 'device', 'cats', 'accountId', 'upiApp', 'toAccountId', 'refundOf', 'notes', 'recurringId', 'settledBy', 'createdBy', 'createdAt', 'updatedAt', 'deleted'],
   Cards: ['id', 'owner', 'name', 'last4', 'statementDay', 'dueDay', 'limit', 'deleted', 'updatedAt'],
   Recurring: ['id', 'description', 'amount', 'category', 'paidBy', 'mode', 'cardId', 'splitType',
-    'payerPct', 'dayOfMonth', 'active', 'deleted', 'updatedAt'],
+    'payerPct', 'dayOfMonth', 'active', 'accountId', 'schedule', 'days', 'askTime', 'startDate', 'deleted', 'updatedAt'],
+  Accounts: ['id', 'owner', 'name', 'upiApp', 'balance0', 'balance0At', 'deleted', 'updatedAt'],
   BillPayments: ['id', 'cardId', 'cycle', 'paidOn', 'paidBy', 'deleted', 'updatedAt'],
   Settings: ['id', 'value', 'updatedAt']
 };
-var WRITABLE = { Expenses: 1, Cards: 1, Recurring: 1, BillPayments: 1, Settings: 1 };
+var WRITABLE = { Expenses: 1, Cards: 1, Accounts: 1, Recurring: 1, BillPayments: 1, Settings: 1 };
 var NUMERIC = { amount: '0.00', share1: '0.00', share2: '0.00', friendsShare: '0.00', createdAt: '0', updatedAt: '0' };
 var USER_COLORS = ['#2563eb', '#c026d3'];
 
@@ -51,15 +52,26 @@ function setup() {
 
   secret_();
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'dailyReminders') ScriptApp.deleteTrigger(t);
+    if (t.getHandlerFunction() === 'dailyReminders' || t.getHandlerFunction() === 'askNotify') ScriptApp.deleteTrigger(t);
   });
   ScriptApp.newTrigger('dailyReminders').timeBased().everyDays(1).atHour(9).create();
+  ScriptApp.newTrigger('askNotify').timeBased().everyMinutes(15).create();
+  // pick how many hashing rounds this account can do in about 0.6 s, so stored passwords are slow to guess
+  var t0 = Date.now(); slowHash_('calibrate', 'calibrate', 300);
+  PropertiesService.getScriptProperties().setProperty('HASH_ROUNDS', String(Math.max(1000, Math.min(50000, Math.round(600 * 300 / Math.max(Date.now() - t0, 1))))));
   Logger.log('Tandem is set up. Now: Deploy -> New deployment -> Web app.');
 }
 
 /* ------------------------------------------------------------------ http */
 
-function doGet() {
+function doGet(e) {
+  var q = (e && e.parameter) || {};
+  if (q.quick) {                       // one-tap links used by phone notifications and iPhone Shortcuts
+    var msg, lock = LockService.getScriptLock();
+    lock.waitLock(25000);
+    try { msg = quick_(q); } catch (err) { msg = 'Tandem: ' + String(err && err.message || err); } finally { lock.releaseLock(); }
+    return ContentService.createTextOutput(msg);
+  }
   return json_({ ok: true, app: APP, message: 'Tandem backend is running. Paste this URL into the app.' });
 }
 
@@ -90,12 +102,19 @@ function route_(req) {
     case 'status': return status_();
     case 'register': return register_(req);
     case 'login': return login_(req);
+    case 'googleLogin': return googleLogin_(req);
+    case 'resetRequest': return resetRequest_(req);
+    case 'resetConfirm': return resetConfirm_(req);
   }
   var me = auth_(req.token);
   switch (req.action) {
     case 'sync': return sync_(me, req);
     case 'updateProfile': return updateProfile_(me, req);
     case 'testEmail': return testEmail_(me);
+    case 'quickKey': return quickKey_(me, req);
+    case 'linkGoogle': return linkGoogle_(me, req);
+    case 'backup': return { ok: true, url: backup_() };
+    case 'ntfyTest': return ntfyTest_(me, req);
   }
   throw fail_('Unknown action');
 }
@@ -110,6 +129,20 @@ function secret_() {
 }
 function hash_(salt, pw) {
   return Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + '|' + pw, Utilities.Charset.UTF_8));
+}
+/* Passwords: salted, then HMAC-SHA256 repeated thousands of times ("v2$rounds$hash"). Older single-pass hashes are upgraded at the next sign-in. */
+function slowHash_(salt, pw, rounds) {
+  rounds = rounds || Number(PropertiesService.getScriptProperties().getProperty('HASH_ROUNDS')) || 3000;
+  var key = Utilities.newBlob(String(pw)).getBytes(), h = Utilities.newBlob(String(salt)).getBytes();
+  for (var i = 0; i < rounds; i++) h = Utilities.computeHmacSha256Signature(h, key);
+  return 'v2$' + rounds + '$' + Utilities.base64Encode(h);
+}
+function checkPw_(u, pw) {
+  var cur = String(u.passHash || '');
+  pw = String(pw || '');
+  if (!pw || cur.indexOf('none$') === 0) return false;            // Google-only account: no password set
+  if (cur.indexOf('v2$') === 0) return slowHash_(u.salt, pw, Number(cur.split('$')[1])) === cur;
+  return hash_(u.salt, pw) === cur;
 }
 function sign_(str) {
   return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(str, secret_()));
@@ -135,7 +168,7 @@ function publicUsers_() {
 
 function status_() {
   var users = publicUsers_();
-  return { ok: true, app: APP, users: users, canRegister: users.length < 2 };
+  return { ok: true, app: APP, users: users, canRegister: users.length < 2, googleClientId: String(setting_('googleClientId', '') || '') };
 }
 
 function register_(req) {
@@ -148,7 +181,7 @@ function register_(req) {
   var salt = Utilities.getUuid();
   var u = {
     id: 'u' + (users.length + 1), name: name, email: String(req.email || '').trim().slice(0, 120),
-    color: USER_COLORS[users.length], salt: salt, passHash: hash_(salt, pw), createdAt: String(Date.now())
+    color: USER_COLORS[users.length], salt: salt, passHash: slowHash_(salt, pw), createdAt: String(Date.now())
   };
   upsert_('Users', u);
   return { ok: true, token: token_(u), userId: u.id };
@@ -161,14 +194,87 @@ function login_(req) {
   var key = 'FAIL_' + u.id;
   var f = JSON.parse(props.getProperty(key) || '{"n":0,"until":0}');
   if (f.until > Date.now()) throw fail_('Too many attempts. Try again in ' + Math.ceil((f.until - Date.now()) / 60000) + ' min.');
-  if (hash_(u.salt, String(req.password || '')) !== u.passHash) {
+  if (!checkPw_(u, req.password)) {
     f.n++;
     if (f.n >= 5) { f.until = Date.now() + 15 * 60000; f.n = 0; }
     props.setProperty(key, JSON.stringify(f));
     throw fail_('Wrong password.');
   }
   props.deleteProperty(key);
+  if (String(u.passHash).indexOf('v2$') !== 0) {                    // upgrade an old hash now that we know the password
+    u.passHash = slowHash_(u.salt, String(req.password));
+    upsert_('Users', { id: u.id, passHash: u.passHash });
+  }
   return { ok: true, token: token_(u), userId: u.id };
+}
+
+/* Forgotten password: a 6-digit code emailed to the address saved on the account. */
+function resetRequest_(req) {
+  var u = findUser_(req.userId);
+  if (!u) throw fail_('Account not found.');
+  if (!u.email) throw fail_('No email is saved on this account, so a code cannot be sent. Sign in with Google if you linked it; otherwise see "Forgot a password" in SETUP.md.');
+  var props = PropertiesService.getScriptProperties(), key = 'RST_' + u.id, cur = JSON.parse(props.getProperty(key) || '{}');
+  if (cur.sentAt && Date.now() - cur.sentAt < 2 * 60000) throw fail_('A code was sent a moment ago. Check your inbox, or try again in 2 minutes.');
+  var code = String(parseInt(Utilities.getUuid().replace(/-/g, '').slice(0, 8), 16) % 1000000);
+  while (code.length < 6) code = '0' + code;
+  props.setProperty(key, JSON.stringify({ h: sign_('reset|' + u.id + '|' + code), until: Date.now() + 15 * 60000, tries: 0, sentAt: Date.now() }));
+  MailApp.sendEmail(u.email, 'Tandem password reset code: ' + code, 'Hi ' + u.name + ',\n\nYour Tandem reset code is ' + code + '. It works for 15 minutes.\n\nIf you did not ask for this, ignore this email; your password has not changed.\n\n— Tandem');
+  return { ok: true, sentTo: String(u.email).replace(/^(.).*(@.*)$/, '$1•••$2') };
+}
+function resetConfirm_(req) {
+  var u = findUser_(req.userId);
+  if (!u) throw fail_('Account not found.');
+  var props = PropertiesService.getScriptProperties(), key = 'RST_' + u.id, cur = JSON.parse(props.getProperty(key) || '{}');
+  if (!cur.h || cur.until < Date.now()) throw fail_('That code has expired. Ask for a new one.');
+  if (cur.tries >= 5) { props.deleteProperty(key); throw fail_('Too many wrong codes. Ask for a new one.'); }
+  if (sign_('reset|' + u.id + '|' + String(req.code || '').trim()) !== cur.h) { cur.tries++; props.setProperty(key, JSON.stringify(cur)); throw fail_('That code is not right.'); }
+  if (String(req.newPassword || '').length < 6) throw fail_('Password must be at least 6 characters.');
+  u.passHash = slowHash_(u.salt, String(req.newPassword));
+  upsert_('Users', { id: u.id, passHash: u.passHash });
+  props.deleteProperty(key); props.deleteProperty('FAIL_' + u.id);
+  return { ok: true, token: token_(u), userId: u.id };
+}
+
+/** A full copy of the spreadsheet in the owner's Drive. Runs on the 1st of each month and from "Back up now". */
+function backup_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var copy = ss.copy(ss.getName() + ' backup ' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd'));
+  return copy.getUrl();
+}
+
+/* Google sign-in: Google verifies the person, we only check the email is linked to one of the two accounts. */
+function googleEmail_(credential) {
+  var cid = String(setting_('googleClientId', '') || '');
+  if (!cid) throw fail_('Google sign-in is not set up yet.');
+  var res = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(String(credential || '')), { muteHttpExceptions: true });
+  if (res.getResponseCode() !== 200) throw fail_('Google could not verify that sign-in. Try again, or use your password.');
+  var t = JSON.parse(res.getContentText());
+  var issOk = t.iss === 'accounts.google.com' || t.iss === 'https://accounts.google.com';
+  if (t.aud !== cid || !issOk || Number(t.exp) * 1000 < Date.now() || String(t.email_verified) !== 'true' || !t.email) throw fail_('That Google sign-in is not valid for this app.');
+  return { email: String(t.email).toLowerCase(), name: String(t.given_name || t.name || '') };
+}
+function googleLogin_(req) {
+  var g = googleEmail_(req.credential), users = read_('Users');
+  var u = users.filter(function (x) { return x.googleEmail && String(x.googleEmail).toLowerCase() === g.email; })[0];
+  if (!u) {
+    if (users.length >= 2) throw fail_(g.email + ' is not linked to an account here. Sign in with your password, then link Google in Settings.');
+    if (!req.register) throw fail_('No Tandem account is linked to ' + g.email + ' yet.', 'canregister');
+    u = { id: 'u' + (users.length + 1), name: (g.name || g.email.split('@')[0]).slice(0, 40), email: g.email, color: USER_COLORS[users.length],
+      salt: Utilities.getUuid(), passHash: 'none$' + Utilities.getUuid(), createdAt: String(Date.now()), googleEmail: g.email };
+    upsert_('Users', u);
+  }
+  return { ok: true, token: token_(u), userId: u.id };
+}
+function linkGoogle_(me, req) {
+  if (req.unlink) {
+    if (String(me.passHash).indexOf('none$') === 0) throw fail_('Set a password first, or you would be locked out.');
+    upsert_('Users', { id: me.id, googleEmail: '' });
+    return { ok: true, googleEmail: '' };
+  }
+  var g = googleEmail_(req.credential);
+  if (read_('Users').some(function (x) { return String(x.id) !== String(me.id) && String(x.googleEmail).toLowerCase() === g.email; })) throw fail_('That Google account is already linked to the other person.');
+  upsert_('Users', { id: me.id, googleEmail: g.email });
+  return { ok: true, googleEmail: g.email };
 }
 
 function updateProfile_(me, req) {
@@ -178,9 +284,9 @@ function updateProfile_(me, req) {
   if (req.color != null && /^#[0-9a-fA-F]{6}$/.test(req.color)) row.color = req.color;
   var newHash = me.passHash;
   if (req.newPassword) {
-    if (hash_(me.salt, String(req.oldPassword || '')) !== me.passHash) throw fail_('Current password is wrong.');
+    if (String(me.passHash).indexOf('none$') !== 0 && !checkPw_(me, req.oldPassword)) throw fail_('Current password is wrong.');
     if (String(req.newPassword).length < 6) throw fail_('Password must be at least 6 characters.');
-    newHash = row.passHash = hash_(me.salt, String(req.newPassword));
+    newHash = row.passHash = slowHash_(me.salt, String(req.newPassword));
   }
   upsert_('Users', row);
   me.passHash = newHash;
@@ -190,7 +296,7 @@ function updateProfile_(me, req) {
 /* ------------------------------------------------------------------ sync */
 
 function sync_(me, req) {
-  var errors = [];
+  var errors = [], started = Date.now() - 5000, since = Number(req.since) || 0;      // 5 s overlap so nothing is missed
   (req.ops || []).forEach(function (op) {
     try {
       if (!op || !WRITABLE[op.table]) throw new Error('Table not allowed');
@@ -199,26 +305,46 @@ function sync_(me, req) {
       var isNew = !table_(op.table).rows[String(row.id)];
       row.updatedAt = Date.now();
       if (op.table === 'Expenses') {
-        if (!(Number(row.amount) >= 0)) throw new Error('Bad amount');
-        if (isNew) { row.createdBy = me.id; row.createdAt = Date.now(); }
+        if (!isFinite(Number(row.amount))) throw new Error('Bad amount');     // refunds are negative
+        if (isNew) { row.createdBy = me.id; var ca = Number(row.createdAt); row.createdAt = ca > 0 && ca <= Date.now() + 60000 ? ca : Date.now(); }   // keep the time it was logged on the phone
         else { delete row.createdBy; delete row.createdAt; }
       }
       upsert_(op.table, row);
     } catch (err) { errors.push({ id: op && op.row && op.row.id, error: String(err.message || err) }); }
   });
-  return { ok: true, data: dump_(), errors: errors, serverTime: Date.now() };
+  return { ok: true, data: dump_(since), incremental: since > 0, errors: errors, serverTime: started };
 }
 
-function dump_() {
+/** Everything, or with `since` only rows changed after that moment (users are always sent). */
+function dump_(since) {
+  var rows = function (name) {
+    var all = read_(name);
+    return since ? all.filter(function (r) { return Number(r.updatedAt) > since; }) : all;
+  };
   return {
-    users: read_('Users').map(function (u) { return { id: u.id, name: u.name, email: u.email, color: u.color }; }),
-    expenses: read_('Expenses'),
-    cards: read_('Cards'),
-    recurring: read_('Recurring'),
-    billPayments: read_('BillPayments'),
-    settings: read_('Settings'),
+    users: read_('Users').map(function (u) { return { id: u.id, name: u.name, email: u.email, color: u.color, googleEmail: u.googleEmail }; }),
+    expenses: rows('Expenses'),
+    cards: rows('Cards'),
+    recurring: rows('Recurring'),
+    billPayments: rows('BillPayments'),
+    accounts: rows('Accounts'),
+    settings: rows('Settings'),
     sheetUrl: SpreadsheetApp.getActiveSpreadsheet().getUrl()
   };
+}
+
+/** When you edit a row by hand in the sheet, stamp it so the app picks the change up on its next sync. */
+function onEdit(e) {
+  try {
+    var sh = e.range.getSheet();
+    if (!WRITABLE[sh.getName()]) return;
+    var col = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].indexOf('updatedAt') + 1;
+    var r0 = Math.max(e.range.getRow(), 2), n = e.range.getLastRow() - r0 + 1;
+    if (col < 1 || n < 1 || (e.range.getColumn() === col && e.range.getLastColumn() === col)) return;
+    var now = Date.now(), vals = [];
+    for (var i = 0; i < n; i++) vals.push([now]);
+    sh.getRange(r0, col, n, 1).setValues(vals);
+  } catch (err) {}
 }
 
 /* ------------------------------------------------------------------ sheet access */
@@ -317,7 +443,7 @@ function truthy_(v) { return v === true || String(v).toLowerCase() === 'true'; }
 
 function cardStatus_() {
   var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
-  var expenses = read_('Expenses').filter(function (e) { return !truthy_(e.deleted) && e.cardId && String(e.type) !== 'settlement'; });
+  var expenses = read_('Expenses').filter(function (e) { return !truthy_(e.deleted) && e.cardId && (!e.type || String(e.type) === 'expense'); });
   var payments = read_('BillPayments').filter(function (b) { return !truthy_(b.deleted); });
   return read_('Cards').filter(function (c) { return !truthy_(c.deleted); }).map(function (c) {
     var S = Number(c.statementDay) || 1, D = Number(c.dueDay) || 1;
@@ -349,6 +475,7 @@ function money_(v) {
 /** Runs every morning (installed by setup). Emails each card owner when a bill is generated and before it is due. */
 function dailyReminders() {
   try { monthlySummary_(); } catch (err) { Logger.log(err); }
+  try { if (Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'd') === '1') backup_(); } catch (err) { Logger.log(err); }
   var remind = Number(setting_('reminderDays', 3)) || 3;
   var users = {};
   read_('Users').forEach(function (u) { users[u.id] = u; });
@@ -383,7 +510,8 @@ function monthlySummary_() {
   var catNames = {}; (setting_('categories', []) || []).forEach(function (c) { catNames[c.id] = (c.emoji ? c.emoji + ' ' : '') + c.name; });
   var total = 0, share = { u1: 0, u2: 0 }, paid = { u1: 0, u2: 0 }, cats = {}, open = 0, openN = 0;
   read_('Expenses').forEach(function (e) {
-    if (truthy_(e.deleted) || String(e.type) === 'settlement') return;
+    if (!truthy_(e.deleted) && String(e.type) === 'settlement' && String(e.category) === 'part' && !e.settledBy) { open += String(e.paidBy) === 'u1' ? Number(e.amount) : -Number(e.amount); openN++; }   // part payment not yet used
+    if (truthy_(e.deleted) || (e.type && String(e.type) !== 'expense')) return;   // skip settlements, transfers and money in
     var amt = Number(e.amount) || 0, s1 = Number(e.share1) || 0, s2 = Number(e.share2) || 0;
     if (!e.settledBy) {                     // positive = u2 owes u1
       var lent = String(e.paidBy) === 'u1' ? s2 : -s1;
@@ -405,6 +533,93 @@ function monthlySummary_() {
     '\n' + n2 + ': paid ' + money_(paid.u2 || 0) + ', share ' + money_(share.u2) +
     (top.length ? '\n\nTop categories:\n' + top.join('\n') : '') + '\n\nTo settle: ' + openLine + '\n\n— Tandem';
   users.forEach(function (u) { if (u.email) MailApp.sendEmail(u.email, '📊 Tandem: ' + label + ' summary', body); });
+}
+
+/* ------------------------------------------------------------------ timed prompts ("Ask me" recurring) */
+
+function quickKey_(me, req) {
+  var key = me.quickKey;
+  if (!key || req.reset) { key = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, ''); upsert_('Users', { id: me.id, quickKey: key }); }
+  return { ok: true, key: key };
+}
+
+function shares_(amount, paidBy, splitType, payerPct) {
+  var pct1 = splitType === 'personal' ? (paidBy === 'u1' ? 100 : 0) : splitType === 'other' ? (paidBy === 'u1' ? 0 : 100) :
+    splitType === 'custom' ? (paidBy === 'u1' ? Number(payerPct) : 100 - Number(payerPct)) : Number(setting_('defaultSplit', 50));
+  if (!isFinite(pct1)) pct1 = 50;
+  var s1 = Math.round(amount * pct1) / 100;
+  return { share1: s1, share2: Math.round((amount - s1) * 100) / 100 };
+}
+
+/** A link tapped from a notification or a Shortcut: add or skip today's entry for one "Ask me" item. */
+function quick_(q) {
+  var u = read_('Users').filter(function (x) { return x.quickKey && String(x.quickKey) === String(q.quick); })[0];
+  if (!u) return 'Tandem: this link is no longer valid. Copy a new one from the app.';
+  var r = read_('Recurring').filter(function (x) { return String(x.id) === String(q.rid); })[0];
+  if (!r || truthy_(r.deleted) || String(r.schedule) !== 'ask' || String(r.paidBy) !== String(u.id)) return 'Tandem: that item no longer exists.';
+  var date = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd'), id = 'ask_' + r.id + '_' + date;
+  if (table_('Expenses').rows[id]) return 'Already added today: ' + r.description;
+  var skipKey = 'askSkips_' + u.id, skips = setting_(skipKey, []) || [];
+  if (q['do'] === 'skip') {
+    if (skips.indexOf(id) < 0) skips.push(id);
+    upsert_('Settings', { id: skipKey, value: JSON.stringify(skips.slice(-40)), updatedAt: Date.now() });
+    return 'Skipped ' + r.description + ' for today.';
+  }
+  if (q['do'] !== 'add') return 'Tandem: unknown action.';
+  var amount = Number(r.amount) || 0, mode = String(r.mode);
+  var acct = read_('Accounts').filter(function (a) { return String(a.id) === String(r.accountId); })[0];
+  var sh = shares_(amount, String(r.paidBy), String(r.splitType), r.payerPct);
+  upsert_('Expenses', { id: id, type: 'expense', date: date, amount: amount, description: r.description, category: r.category, paidBy: r.paidBy,
+    mode: mode, cardId: r.cardId, accountId: r.accountId, upiApp: mode === 'upi' && acct ? acct.upiApp : '', splitType: r.splitType,
+    share1: sh.share1, share2: sh.share2, notes: '', recurringId: r.id, createdBy: u.id, createdAt: Date.now(), updatedAt: Date.now(), deleted: false });
+  if (skips.indexOf(id) >= 0) upsert_('Settings', { id: skipKey, value: JSON.stringify(skips.filter(function (x) { return x !== id; })), updatedAt: Date.now() });
+  return 'Added ' + r.description + ' ' + money_(amount);
+}
+
+function ntfy_(payload) {
+  return UrlFetchApp.fetch('https://ntfy.sh/', { method: 'post', contentType: 'application/json', payload: JSON.stringify(payload), muteHttpExceptions: true }).getResponseCode();
+}
+
+function ntfyTest_(me, req) {
+  var topic = String(req.topic || setting_('ntfy_' + me.id, ''));
+  if (!/^[A-Za-z0-9_-]{8,60}$/.test(topic)) throw fail_('Save a topic first.');
+  var code = ntfy_({ topic: topic, title: 'Tandem is connected', message: 'You will get Add / Not today prompts here for your "Ask me" items.', tags: ['white_check_mark'] });
+  if (code >= 300) throw fail_('ntfy did not accept the message (code ' + code + ').');
+  return { ok: true };
+}
+
+/** Runs every 5 minutes (installed by setup). Sends each due "Ask me" item once a day to its payer's ntfy topic. */
+function askNotify() {
+  var recs = read_('Recurring').filter(function (r) { return String(r.schedule) === 'ask' && truthy_(r.active) && !truthy_(r.deleted) && Number(r.amount) > 0; });
+  if (!recs.length) return;
+  var api = setting_('quickApi', ''), appUrl = setting_('appUrl', '');
+  if (!api) return;
+  var tz = Session.getScriptTimeZone(), now = new Date();
+  var today = Utilities.formatDate(now, tz, 'yyyy-MM-dd'), hm = Utilities.formatDate(now, tz, 'HH:mm');
+  var dow = String(Number(Utilities.formatDate(now, tz, 'u')) % 7);            // 0 = Sunday, like the app
+  var props = PropertiesService.getScriptProperties();
+  var sent = JSON.parse(props.getProperty('ASK_SENT') || '{}');
+  if (sent.day !== today) sent = { day: today, ids: [] };
+  var users = {}; read_('Users').forEach(function (u) { users[u.id] = u; });
+  var rows = null, changed = false;
+  recs.forEach(function (r) {
+    var id = 'ask_' + r.id + '_' + today, u = users[r.paidBy];
+    if (!u || !u.quickKey || sent.ids.indexOf(id) >= 0) return;
+    if (String(r.days).split(',').indexOf(dow) < 0 || hm < String(r.askTime).slice(0, 5)) return;
+    if (r.startDate && today < String(r.startDate).slice(0, 10)) return;
+    var topic = setting_('ntfy_' + u.id, '');
+    if (!topic) return;
+    rows = rows || table_('Expenses').rows;
+    sent.ids.push(id); changed = true;
+    if (rows[id] || (setting_('askSkips_' + u.id, []) || []).indexOf(id) >= 0) return;     // already answered in the app
+    var link = api + '?quick=' + encodeURIComponent(u.quickKey) + '&rid=' + encodeURIComponent(r.id) + '&do=';
+    var payload = { topic: topic, title: r.description + ' today?', message: money_(Number(r.amount)) + ' · Add it or skip', tags: ['fork_and_knife'],
+      actions: [{ action: 'http', label: 'Add ' + money_(Number(r.amount)), url: link + 'add', method: 'GET', clear: true },
+                { action: 'http', label: 'Not today', url: link + 'skip', method: 'GET', clear: true }] };
+    if (appUrl) payload.click = appUrl;
+    ntfy_(payload);
+  });
+  if (changed) props.setProperty('ASK_SENT', JSON.stringify(sent));
 }
 
 function testEmail_(me) {

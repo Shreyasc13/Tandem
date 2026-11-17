@@ -70,8 +70,49 @@ Cloudflare Pages or Netlify (drag-and-drop the `app` folder) work just as well.
 - **Platforms:** tag an expense with where it was ordered (Amazon, Swiggy, Zepto…) and whether it was the primary or office phone. Typing the platform's name in the description picks it automatically. Edit the list under More → Categories.
 - **Mixed orders:** tap *Mixed* under Category, then pick any categories and the amount for each (add as many rows as you need).
 - **On someone's behalf:** switch *Paid by* to your partner; it counts as their payment and is marked as added by you.
+- **Bank accounts:** More → Bank accounts & money in. Add each account with the UPI app you use for it; when you pay by UPI, debit card or net banking the form lets you pick which account.
+- **Money in:** in the add screen switch *Expense* to *Money in* for salary, transfers, refunds and deposits. It is kept out of spending and shown against your spend for the month.
+- **Ask-first recurring:** More → Recurring → *Ask me on some days*. Pick the days and a time; from then Home shows “Add this?” with Add / No (and a device notification while the app is running, if notifications are on).
+- **UPI app:** when the mode is UPI, pick the app (GPay, PhonePe…) as well as the account. Picking an account fills in its usual app.
+- **Timed prompts when the app is closed:** Settings → *Timed prompts* → *Set up on this phone*.
+  - **Android:** install the free **ntfy** app, subscribe to the private topic shown, save. The sheet checks every 5 minutes and sends each due "Ask me" item once, with **Add** and **Not today** buttons that write straight to the sheet.
+  - **iPhone:** Shortcuts → Automation → Time of Day → *Choose from Menu* (Add / No) → *Get Contents of URL* with the links copied from the app.
+  - The first time you run **setup** after this update, Google asks for one more permission (connect to an external service) so the script can reach ntfy.
+- **Transfers:** in the add screen choose *Transfer* for a credit card bill payment, money moved between your own accounts, or a cash withdrawal. They are not spending or income. A card bill transfer also marks that card's bill as paid.
+- **Account balance:** open an account and type what it holds today. From then on the account shows an approximate running balance from what you log (settlements between the two of you are not included).
+- **Refunds:** open the expense → *Refund*. It is recorded as a negative entry with the same split, so spending, the card bill and what you owe each other all adjust.
+- **Part payments:** Settle up → *Pay a part instead* records money handed over on account; it comes off the next settlement. For friends, open the friend → *Received a part*.
+- **Import:** More → *Import expenses*. Download your old sheet as CSV and pick the file; check the column matching and the preview before importing. Importing the same rows twice is skipped.
+- **Backups:** on the 1st of each month the script saves a full copy of the sheet in the owner's Google Drive (named "… backup YYYY-MM-DD"); Settings → *Back up now* makes one on demand. Old copies are not deleted automatically.
+- **Forgot a password:** on the sign-in screen tap *Forgot password?* to get a code by email (needs an email saved in Settings). Without one, sign in with Google, or unhide the `Users` tab and delete that person's row, then register again.
+- **Reconcile (catching what you forgot to log):** each credit card and bank account has a *Reconcile* button.
+  - *Card:* after the bill is generated, type the statement total. Tandem shows the gap against what you logged for that cycle; add the transactions you remember, mark fees/interest, and book whatever is left as **Unaccounted** (counted against the card owner only).
+  - *Account:* type the balance the bank shows. Tandem compares it with the balance it expected and does the same. Reconciling resets the starting balance to the real one.
+  - *Match a statement file:* pick the statement CSV instead and Tandem lists only the payments it cannot find among your entries (same amount within ₹1 and within 3 days counts as a match).
 - **Monthly email:** on the 1st, both of you get last month's totals and what is still open to settle (turn off in Settings).
 - **Recurring:** rent, subscriptions and so on are added automatically on their day each month, the next time either of you opens the app.
+
+## Google sign-in (optional, recommended)
+
+Lets each of you sign in with your Google account instead of a password. One-time setup, free:
+
+1. Go to <https://console.cloud.google.com/>, create a project (any name).
+2. Open **APIs & Services → OAuth consent screen** (it may be called *Google Auth Platform*). Choose **External**, give it a name such as "Tandem", and enter your email where asked. While the app is in *Testing*, add both of your Google addresses as **test users**.
+3. Open **Credentials** (or *Clients*) → **Create credentials → OAuth client ID** → type **Web application**.
+4. Under **Authorized JavaScript origins** add the address of your app *without any path*, for example `https://shreyasc13.github.io`.
+5. Create, then copy the **Client ID** (it ends in `.apps.googleusercontent.com`).
+6. In Tandem: **Settings → Google sign-in**, paste the client ID. A Google button appears; tap it to link your account. Your partner does the same on their device after signing in once with their password.
+
+From then on the sign-in screen shows a Google button. Password sign-in keeps working as a fallback (for example if the Google pop-up does not open inside the installed iPhone app).
+
+- Passwords are stored as a salted hash repeated thousands of times; old ones are upgraded automatically the next time you sign in with the password. That upgrade signs your other devices out once.
+- Google checks are done by asking Google's `tokeninfo` service. Google describes that service as meant for debugging and says it can be throttled, so if a Google sign-in fails, try again or use the password.
+
+## Speed and storage
+
+- The app keeps its copy of your data in the browser's database (IndexedDB), not the small 5 MB store.
+- A sync only downloads rows changed since the last one. A full copy is fetched once a day, on first sign-in, and whenever you tap the sync pill.
+- Rows you edit by hand in the sheet are stamped automatically so the app picks them up. If something you changed in the sheet does not show, tap the sync pill.
 
 ## Updating later
 

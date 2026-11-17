@@ -118,6 +118,7 @@ nav.bottom .fab svg{width:26px;height:26px;stroke-width:2.4}
 .flabel.shut{cursor:pointer;background:none;text-align:left}
 .chip.ghost{background:none;border:1.5px dashed var(--line);color:var(--muted)}
 .mrow{display:grid;grid-template-columns:1fr 110px 34px;gap:8px;margin-bottom:8px;align-items:center}.mrow .in{padding:10px 10px}
+button.rmain{background:none;padding:0;color:inherit}
 .x{width:34px;height:34px;border-radius:50%;background:var(--surface2);font-size:18px}
 #toast{position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:99px;font-size:14px;font-weight:600;z-index:40;opacity:0;pointer-events:none;transition:opacity .2s;white-space:nowrap;max-width:90vw;overflow:hidden;text-overflow:ellipsis}
 #toast.show{opacity:1}
@@ -251,18 +252,36 @@ const PALETTE = ['#0f766e', '#2563eb', '#d97706', '#c026d3', '#dc2626', '#65a30d
 const USER_COLORS = { u1: '#2563eb', u2: '#c026d3' };
 
 /* ───────────────────────── state ───────────────────────── */
-const blank = () => ({ users: [], expenses: [], cards: [], recurring: [], billPayments: [], settings: {} });
+const blank = () => ({ users: [], expenses: [], cards: [], accounts: [], recurring: [], billPayments: [], settings: {} });
 let cfg = store.get(K.cfg, {});            // {api, demo}
 let session = store.get(K.session, null);  // {token, userId}
-let state = Object.assign(blank(), store.get(K.state, {}));
+let state = blank();
 let queue = store.get(K.queue, []);
 let prefs = store.get(K.prefs, {});
 let meta = store.get(K.meta, {});
 let ui = { view: 'home', month: monthOf(today()), basis: 'all', filter: { q: '', who: '', cat: '', mode: '', plat: '' } };
 let syncing = false, syncAgain = false, syncErr = null, syncTimer = null, lastSync = 0, installEvt = null;
-const TABLES = { Expenses: 'expenses', Cards: 'cards', Recurring: 'recurring', BillPayments: 'billPayments' };
+const TABLES = { Expenses: 'expenses', Cards: 'cards', Accounts: 'accounts', Recurring: 'recurring', BillPayments: 'billPayments' };
 
-const saveState = () => store.set(K.state, state);
+/* the data copy lives in IndexedDB (no practical size cap); small settings stay in localStorage */
+const idb = {
+  _p: null,
+  open() { return this._p || (this._p = new Promise((res, rej) => { try { const r = indexedDB.open('tandem', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); } catch (e) { rej(e); } })); },
+  async run(mode, fn) { const d = await this.open(); return new Promise((res, rej) => { const q = fn(d.transaction('kv', mode).objectStore('kv')); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); },
+  get(k) { return this.run('readonly', s => s.get(k)); },
+  set(k, v) { return this.run('readwrite', s => s.put(v, k)); },
+  del(k) { return this.run('readwrite', s => s.delete(k)); }
+};
+let saveT = null;
+const flushState = () => { clearTimeout(saveT); saveT = null; return idb.set('state', state).catch(() => store.set(K.state, state)); };
+const saveState = () => { if (!saveT) saveT = setTimeout(flushState, 250); };
+async function loadState() {
+  let s = null;
+  try { s = await idb.get('state'); } catch {}
+  if (!s) { s = store.get(K.state, null); if (s) { try { await idb.set('state', s); store.del(K.state); } catch {} } }   // one-time move from the old storage
+  state = Object.assign(blank(), s || {});
+  queue.forEach(applyLocal);          // anything saved but not yet synced
+}
 const saveQueue = () => store.set(K.queue, queue);
 const savePrefs = () => store.set(K.prefs, prefs);
 
@@ -288,16 +307,30 @@ const you = id => (id === meId() ? 'You' : uname(id));
 const youL = id => (id === meId() ? 'you' : uname(id));
 const ucolor = id => user(id).color || USER_COLORS[id];
 const avatar = (id, cls = '') => `<span class="avatar ${cls}" style="background:${esc(ucolor(id))}">${esc((uname(id)[0] || '?').toUpperCase())}</span>`;
-const cat = id => S.cats.find(c => c.id === id) || { id, name: id || 'Other', emoji: '📦' };
+const SPECIAL_CATS = { unaccounted: { id: 'unaccounted', name: 'Unaccounted', emoji: '❓' }, fees: { id: 'fees', name: 'Fees & interest', emoji: '🏦' } };
+const cat = id => S.cats.find(c => c.id === id) || SPECIAL_CATS[id] || { id, name: id || 'Other', emoji: '📦' };
+const recons = () => state.settings.recon || {};
+const setRecon = (id, total) => setSetting('recon', { ...recons(), [id]: { total, at: today() } });
+let reconDraft = {};
 const shareOf = (e, id) => (id === 'u1' ? e.share1 : e.share2);
 const live = () => state.expenses.filter(e => !e.deleted);
-const spends = () => live().filter(e => e.type !== 'settlement');
+const spends = () => live().filter(e => e.type === 'expense');
+const incomes = () => live().filter(e => e.type === 'income');
+const IN_KINDS = [['salary', 'Salary', '💼'], ['transfer', 'Transfer', '🔁'], ['refund', 'Refund', '↩️'], ['deposit', 'Deposit', '🏦'], ['other_in', 'Other', '💰']];
+const inKind = id => IN_KINDS.find(k => k[0] === id) || IN_KINDS[4];
+const UPI_APPS = ['GPay', 'PhonePe', 'Paytm', 'CRED', 'BHIM', 'Amazon Pay', 'WhatsApp Pay'];
+const ACCT_MODES = ['upi', 'debit_card', 'netbanking'];
+const upiApps = () => [...new Set([...UPI_APPS.slice(0, 5), ...liveAccts().map(a => a.upiApp), ...(state.settings.upiApps || [])].filter(Boolean))];
+const liveAccts = () => (state.accounts || []).filter(a => !a.deleted);
+const acctLabel = a => a.name + (a.upiApp ? ' · ' + a.upiApp : '');
+const DAYN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const dayText = d => (d === '1,2,3,4,5' ? 'Mon–Fri' : d.split(',').filter(Boolean).sort((a, b) => ((+a + 6) % 7) - ((+b + 6) % 7)).map(x => DAYN[x]).join(' '));
 const liveCards = () => state.cards.filter(c => !c.deleted);
 /* friends: a third bucket on an expense. Each friend's part is owed to whoever paid. */
 const friendsAll = () => state.settings.friends || [];
 const friendName = id => (friendsAll().find(x => x.id === id) || {}).name || 'Friend';
 const spendOf = e => round2(e.amount - (e.friendsShare || 0));       // what the two of you actually spent
-function friendDues() { const out = []; for (const e of spends()) for (const p of e.friends || []) if (!p.settled && p.amount > 0) out.push({ id: p.id, e, amount: p.amount }); return out; }
+function friendDues() { const out = []; for (const e of spends()) for (const p of e.friends || []) if (!p.settled && p.amount - (p.paid || 0) > 0.005) out.push({ id: p.id, e, amount: round2(p.amount - (p.paid || 0)), full: p.amount }); return out; }
 const share = async (text, done) => { try { if (navigator.share) await navigator.share({ text }); else { await navigator.clipboard.writeText(text); toast(done || 'Copied'); } } catch { try { await navigator.clipboard.writeText(text); toast(done || 'Copied'); } catch {} } };
 
 /* ───────────────────────── normalise server data ───────────────────────── */
@@ -308,7 +341,7 @@ function parseCats(v) {
 }
 function parseFriends(v) {
   let a = v; if (typeof v === 'string') { try { a = JSON.parse(v || '[]'); } catch { a = []; } }
-  return Array.isArray(a) ? a.filter(p => p && p.id).map(p => ({ id: String(p.id), amount: Number(p.amount) || 0, settled: p.settled ? String(p.settled) : '' })) : [];
+  return Array.isArray(a) ? a.filter(p => p && p.id).map(p => ({ id: String(p.id), amount: Number(p.amount) || 0, paid: Number(p.paid) || 0, settled: p.settled ? String(p.settled) : '' })) : [];
 }
 function norm(d) {
   const b = v => v === true || String(v).toLowerCase() === 'true';
@@ -317,15 +350,16 @@ function norm(d) {
   const settings = {};
   (d.settings || []).forEach(r => { try { settings[s(r.id)] = JSON.parse(r.value); } catch {} });
   return {
-    users: (d.users || []).map(u => ({ id: s(u.id), name: s(u.name), email: s(u.email), color: s(u.color) })),
+    users: (d.users || []).map(u => ({ id: s(u.id), name: s(u.name), email: s(u.email), color: s(u.color), googleEmail: s(u.googleEmail) })),
     expenses: (d.expenses || []).map(e => ({
       id: s(e.id), type: s(e.type) || 'expense', date: s(e.date).slice(0, 10), amount: n(e.amount), description: s(e.description),
-      category: s(e.category), paidBy: s(e.paidBy), mode: s(e.mode), cardId: s(e.cardId), splitType: s(e.splitType),
-      share1: n(e.share1), share2: n(e.share2), notes: s(e.notes), platform: s(e.platform), device: s(e.device), cats: parseCats(e.cats), splitInfo: parseObj(e.splitInfo), recurringId: s(e.recurringId), settledBy: s(e.settledBy), friendsShare: n(e.friendsShare), friends: parseFriends(e.friends), createdBy: s(e.createdBy),
+      category: s(e.category), paidBy: s(e.paidBy), mode: s(e.mode), cardId: s(e.cardId), accountId: s(e.accountId), upiApp: s(e.upiApp), splitType: s(e.splitType),
+      share1: n(e.share1), share2: n(e.share2), notes: s(e.notes), platform: s(e.platform), device: s(e.device), cats: parseCats(e.cats), splitInfo: parseObj(e.splitInfo), toAccountId: s(e.toAccountId), refundOf: s(e.refundOf), recurringId: s(e.recurringId), settledBy: s(e.settledBy), friendsShare: n(e.friendsShare), friends: parseFriends(e.friends), createdBy: s(e.createdBy),
       createdAt: n(e.createdAt), updatedAt: n(e.updatedAt), deleted: b(e.deleted)
     })).filter(e => /^\d{4}-\d{2}-\d{2}$/.test(e.date)),
     cards: (d.cards || []).map(c => ({ id: s(c.id), owner: s(c.owner), name: s(c.name), last4: s(c.last4), statementDay: n(c.statementDay) || 1, dueDay: n(c.dueDay) || 1, limit: n(c.limit), deleted: b(c.deleted) })),
-    recurring: (d.recurring || []).map(r => ({ id: s(r.id), description: s(r.description), amount: n(r.amount), category: s(r.category), paidBy: s(r.paidBy), mode: s(r.mode), cardId: s(r.cardId), splitType: s(r.splitType) || 'shared', payerPct: n(r.payerPct), dayOfMonth: n(r.dayOfMonth) || 1, active: b(r.active), deleted: b(r.deleted) })),
+    recurring: (d.recurring || []).map(r => ({ id: s(r.id), description: s(r.description), amount: n(r.amount), category: s(r.category), paidBy: s(r.paidBy), mode: s(r.mode), cardId: s(r.cardId), splitType: s(r.splitType) || 'shared', payerPct: n(r.payerPct), dayOfMonth: n(r.dayOfMonth) || 1, active: b(r.active), deleted: b(r.deleted), accountId: s(r.accountId), schedule: s(r.schedule) === 'ask' ? 'ask' : 'monthly', days: s(r.days), askTime: /^\d{2}:\d{2}$/.test(s(r.askTime)) ? s(r.askTime) : '13:00', startDate: s(r.startDate).slice(0, 10) })),
+    accounts: (d.accounts || []).map(a => ({ id: s(a.id), owner: s(a.owner), name: s(a.name), upiApp: s(a.upiApp), balance0: n(a.balance0), balance0At: n(a.balance0At), deleted: b(a.deleted) })),
     billPayments: (d.billPayments || []).map(p => ({ id: s(p.id), cardId: s(p.cardId), cycle: s(p.cycle), paidOn: s(p.paidOn), paidBy: s(p.paidBy), deleted: b(p.deleted) })),
     settings
   };
@@ -356,21 +390,35 @@ async function api(action, payload = {}) {
   return j;
 }
 function scheduleSync(ms = 500) { clearTimeout(syncTimer); syncTimer = setTimeout(sync, ms); }
-async function sync() {
+let wantFull = false;
+async function sync(forceFull) {
   if (cfg.demo || !cfg.api || !session) return;
+  if (forceFull) wantFull = true;
   if (syncing) { syncAgain = true; return; }
   syncing = true; setStatus();
-  const sending = queue.slice();
+  const sending = queue.slice(0, 150);
   try {
-    const res = await api('sync', { token: session.token, ops: sending });
+    // normally only rows changed since the last sync come back; a full copy once a day, on first use, or when you tap the sync pill
+    const full = wantFull || !meta.since || !state.users.length || Date.now() - (meta.fullAt || 0) > 864e5;
+    wantFull = false;
+    const res = await api('sync', { token: session.token, ops: sending, since: full ? 0 : meta.since });
     queue = queue.slice(sending.length); saveQueue();
+    if (queue.length) syncAgain = true;
     const had = new Set(state.expenses.map(e => e.id)), firstSync = !meta.synced;
-    state = norm(res.data);
-    if (res.data.sheetUrl) { meta.sheetUrl = res.data.sheetUrl; store.set(K.meta, meta); }
+    const got = norm(res.data);
+    if (res.incremental) {
+      state.users = got.users.length ? got.users : state.users;
+      Object.values(TABLES).forEach(k => { const at = new Map(state[k].map((r, i) => [r.id, i])); got[k].forEach(r => { if (at.has(r.id)) state[k][at.get(r.id)] = r; else state[k].push(r); }); });
+      Object.assign(state.settings, got.settings);
+    } else { state = got; meta.fullAt = Date.now(); }
+    if (res.serverTime) meta.since = res.serverTime;
+    if (res.data.sheetUrl) meta.sheetUrl = res.data.sheetUrl;
+    store.set(K.meta, meta);
     queue.forEach(applyLocal);
     saveState(); lastSync = Date.now(); syncErr = null;
     runRecurring();
     render(true); notifyCards();
+    if ((res.errors || []).length) toast('Some changes were not saved. Update the backend script and run setup.');
     const fresh = state.expenses.filter(e => !had.has(e.id) && !e.deleted && e.createdBy && e.createdBy !== meId());
     if (!meta.synced) { meta.synced = true; store.set(K.meta, meta); }
     if (!firstSync && fresh.length) toast(`${uname(otherId())} added ${fresh.length === 1 ? (fresh[0].type === 'settlement' ? 'a settlement' : '“' + fresh[0].description + '” ' + money(fresh[0].amount)) : fresh.length + ' entries'}`);
@@ -406,9 +454,25 @@ function computeShares(amount, paidBy, splitType, payerPct) {
   return { share1, share2: round2(amount - share1) };
 }
 /** Positive: partner owes me. Negative: I owe partner. */
-const lentOf = e => (e.paidBy === meId() ? shareOf(e, otherId()) : -shareOf(e, meId()));
+/* a part payment is money handed over "on account": it stays an open item until a settlement uses it */
+const isPart = e => e.type === 'settlement' && e.category === 'part';
+const lentOf = e => (isPart(e) ? (e.paidBy === meId() ? e.amount : -e.amount) : e.paidBy === meId() ? shareOf(e, otherId()) : -shareOf(e, meId()));
+const refundedOf = id => round2(-spends().filter(e => e.refundOf === id).reduce((s, e) => s + e.amount, 0));
+const TR_KINDS = [['card_bill', 'Card bill', '💳'], ['own', 'Between my accounts', '🔁'], ['cash', 'Cash withdrawal', '💵']];
+const trKind = id => TR_KINDS.find(k => k[0] === id) || TR_KINDS[1];
+/** money in / out of one account over the entries that match `pred` */
+function acctFlow(a, pred) {
+  let i = 0, o = 0;
+  for (const e of live()) {
+    if (!pred(e)) continue;
+    if (e.type === 'income') { if (e.accountId === a.id) i += e.amount; }
+    else if (e.type === 'transfer') { if (e.accountId === a.id) o += e.amount; if (e.toAccountId === a.id) i += e.amount; }
+    else if (e.type === 'expense' && e.accountId === a.id) { if (e.amount < 0) i -= e.amount; else o += e.amount; }
+  }
+  return { i: round2(i), o: round2(o) };
+}
 /** Shared expenses that no settlement has closed yet. The balance is simply their sum. */
-const openItems = () => spends().filter(e => !e.settledBy && lentOf(e) !== 0);
+const openItems = () => live().filter(e => (e.type === 'expense' || isPart(e)) && !e.settledBy && lentOf(e) !== 0);
 function balance() { return round2(openItems().reduce((s, e) => s + lentOf(e), 0)); }
 function stats(ym, basis = 'all') {
   const me = meId(), list = spends().filter(e => monthOf(e.date) === ym);
@@ -452,7 +516,57 @@ function cardAlerts() {
   }
   return out;
 }
+/* ask-first recurring: on chosen weekdays, from a set time, Home asks "Add this?" */
+function askPrompts() {
+  if (!session) return [];
+  const me = meId(), t = today(), now = new Date(), hm = pad(now.getHours()) + ':' + pad(now.getMinutes());
+  const skips = new Set(state.settings['askSkips_' + me] || []), out = [];
+  for (const r of state.recurring) {
+    if (r.deleted || !r.active || r.schedule !== 'ask' || r.paidBy !== me || !r.amount) continue;
+    const days = r.days.split(',');
+    for (let i = 0; i < 3; i++) {
+      const d = addDays(t, -i), id = `ask_${r.id}_${d}`;
+      if (!days.includes(String(parseD(d).getDay())) || (i === 0 && hm < r.askTime) || (r.startDate && d < r.startDate)) continue;
+      if (skips.has(id) || state.expenses.some(e => e.id === id)) continue;
+      out.push({ r, date: d, id });
+    }
+  }
+  return out.sort((a, b) => b.date.localeCompare(a.date));
+}
+function askExpense(p) {
+  const r = p.r;
+  return { id: p.id, type: 'expense', date: p.date, amount: r.amount, description: r.description, category: r.category, paidBy: r.paidBy, mode: r.mode, cardId: r.cardId, accountId: r.accountId || '', upiApp: r.mode === 'upi' ? (liveAccts().find(a => a.id === r.accountId) || {}).upiApp || '' : '', splitType: r.splitType, ...computeShares(r.amount, r.paidBy, r.splitType, r.payerPct), notes: '', recurringId: r.id, createdBy: meId(), createdAt: Date.now(), deleted: false };
+}
+function doAsk(id, action) {
+  const p = askPrompts().find(x => x.id === id); if (!p) return;
+  if (action === 'add') { const row = askExpense(p); mutate('Expenses', row); toast(`Added ${p.r.description} ${money(p.r.amount)}`, { label: 'Undo', fn: () => mutate('Expenses', { ...row, deleted: true }) }); }
+  else if (action === 'skip') { const key = 'askSkips_' + meId(), lim = addDays(today(), -7); setSetting(key, [...(state.settings[key] || []).filter(x => x.slice(-10) >= lim), id]); render(); }
+  else if (action === 'edit') { const r = p.r; openExpense(null, { id: p.id, date: p.date, amount: r.amount, description: r.description, category: r.category, paidBy: r.paidBy, mode: r.mode, cardId: r.cardId, accountId: r.accountId || '', splitType: r.splitType, recurringId: r.id }); }
+}
+async function notifyAsk() {
+  if (!session || !('Notification' in window) || Notification.permission !== 'granted') return;
+  const seen = store.get(K.notified, {}), t = today(); let changed = false;
+  for (const p of askPrompts()) {
+    if (p.date !== t || seen[p.id]) continue;
+    seen[p.id] = t; changed = true;
+    const title = `${p.r.description} today?`, opt = { body: `${money(p.r.amount)} · add it or skip`, icon: 'icon-192.png', badge: 'icon-192.png', tag: p.id, data: { ask: p.id } };
+    try {
+      const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+      if (reg) reg.showNotification(title, { ...opt, actions: [{ action: 'add', title: 'Add ' + money(p.r.amount) }, { action: 'skip', title: 'Not today' }] });
+      else new Notification(title, opt);
+    } catch {}
+  }
+  if (changed) store.set(K.notified, seen);
+}
+let askN = -1;
+function tick() {
+  if (!session) return;
+  const n = askPrompts().length;
+  if (n !== askN) { askN = n; if (ui.view === 'home' && !$('#sheet').innerHTML) render(true); }
+  notifyAsk();
+}
 async function notifyCards() {
+  notifyAsk();
   if (!session || !('Notification' in window) || Notification.permission !== 'granted') return;
   const seen = store.get(K.notified, {}), t = today(); let changed = false;
   for (const a of cardAlerts()) {
@@ -474,7 +588,7 @@ function runRecurring() {
   const t = today(), ym = monthOf(t), [y, m, d] = t.split('-').map(Number);
   let made = 0;
   for (const r of state.recurring) {
-    if (r.deleted || !r.active || !r.amount) continue;
+    if (r.deleted || !r.active || !r.amount || r.schedule === 'ask') continue;
     const day = Math.min(r.dayOfMonth, dim(y, m));
     if (d < day) continue;
     const id = `rec_${r.id}_${ym}`;
@@ -499,8 +613,8 @@ function openSheet(title, html) {
 }
 function closeSheet() { $('#sheet').innerHTML = ''; }
 const chip = (on, attrs, label) => `<button type="button" class="chip ${on ? 'on' : ''}" ${attrs}>${label}</button>`;
-const TITLES = { home: 'Tandem', expenses: 'Expenses', insights: 'Insights', more: 'More', cards: 'Credit cards', recurring: 'Recurring', budgets: 'Budgets', categories: 'Categories', settings: 'Settings', friends: 'Friends' };
-const SUB = ['cards', 'recurring', 'budgets', 'categories', 'settings', 'friends'];
+const TITLES = { home: 'Tandem', expenses: 'Expenses', insights: 'Insights', more: 'More', cards: 'Credit cards', recurring: 'Recurring', budgets: 'Budgets', categories: 'Categories', settings: 'Settings', friends: 'Friends', accounts: 'Bank accounts' };
+const SUB = ['cards', 'recurring', 'budgets', 'categories', 'settings', 'friends', 'accounts'];
 function go(v) { if (location.hash !== '#/' + v) location.hash = '#/' + v; else { ui.view = v; render(); } }
 
 function render(soft) {
@@ -513,31 +627,40 @@ function render(soft) {
     <button data-act="nav" data-v="settings" aria-label="Settings">${avatar(meId())}</button>`;
   $$('nav.bottom button[data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === (sub ? 'more' : v)));
   $('#view').innerHTML = (VIEWS[v] || VIEWS.home)();
+  if (v === 'settings') mountGoogleLink();
   setStatus();
 }
 
 /* ───────────────────────── views ───────────────────────── */
 function expRow(e) {
   const me = meId();
+  if (e.type === 'transfer') {
+    const k = trKind(e.category);
+    return `<button class="row" data-act="editTransfer" data-id="${esc(e.id)}"><span class="ico">${k[2]}</span><span class="rmain"><b>${esc(e.description || k[1])}</b><small>${esc(you(e.paidBy))} · ${k[1]}</small></span><span class="ramt"><b class="muted">${money(e.amount)}</b><small class="muted">transfer</small></span></button>`;
+  }
+  if (e.type === 'income') {
+    const k = inKind(e.category), a = (state.accounts || []).find(x => x.id === e.accountId);
+    return `<button class="row" data-act="editIncome" data-id="${esc(e.id)}"><span class="ico">${k[2]}</span><span class="rmain"><b>${esc(e.description || k[1])}</b><small>${esc(you(e.paidBy))} · ${k[1]}${a ? ' · into ' + esc(a.name) : ''}</small></span><span class="ramt"><b class="pos">+${money(e.amount)}</b><small class="muted">money in</small></span></button>`;
+  }
   if (e.type === 'settlement') {
-    return `<button class="row" data-act="editSettle" data-id="${esc(e.id)}"><span class="ico">🤝</span><span class="rmain"><b>${esc(you(e.paidBy))} paid ${esc(youL(other(e.paidBy)))}</b><small>Settlement · ${(n => n ? n + ' expense' + (n > 1 ? 's' : '') + ' · ' : '')(state.expenses.filter(x => x.settledBy === e.id).length)}${esc(modeLabel(e.mode))}</small></span><span class="ramt"><b>${money(e.amount)}</b></span></button>`;
+    return `<button class="row" data-act="editSettle" data-id="${esc(e.id)}"><span class="ico">🤝</span><span class="rmain"><b>${esc(you(e.paidBy))} paid ${esc(youL(other(e.paidBy)))}</b><small>${isPart(e) ? 'Part payment · ' + (e.settledBy ? 'used' : 'open') : 'Settlement'} · ${(n => n ? n + ' expense' + (n > 1 ? 's' : '') + ' · ' : '')(state.expenses.filter(x => x.settledBy === e.id).length)}${esc(modeLabel(e.mode))}</small></span><span class="ramt"><b>${money(e.amount)}</b></span></button>`;
   }
   const c = cat(e.category), mixed = (e.cats || []).length > 1, lent = e.paidBy === me ? shareOf(e, otherId()) : -shareOf(e, me);
   const tag = lent && e.settledBy ? '<small class="muted">settled ✓</small>' : lent > 0 ? `<small class="pos">you lent ${money(lent)}</small>` : lent < 0 ? `<small class="neg">you owe ${money(-lent)}</small>` : `<small class="muted">${e.paidBy === me ? 'just you' : 'just ' + esc(uname(e.paidBy))}</small>`;
   const card = e.cardId && state.cards.find(k => k.id === e.cardId);
   return `<button class="row" data-act="edit" data-id="${esc(e.id)}"><span class="ico">${esc(c.emoji)}</span>
-    <span class="rmain"><b>${esc(e.description || c.name)}</b><small>${esc(you(e.paidBy))} · ${esc(card ? card.name : modeLabel(e.mode))} · ${esc(mixed ? e.cats.map(k => cat(k.id).name).join(' + ') : c.name)}${e.platform ? ' · ' + esc(e.platform) + (e.device === 'office' ? ' (office)' : '') : ''}${e.friendsShare ? ' · 👥 ' + money0(e.friendsShare) : ''}${e.createdBy && e.createdBy !== e.paidBy ? ' · added by ' + esc(youL(e.createdBy)) : ''}</small></span>
+    <span class="rmain"><b>${esc(e.description || c.name)}</b><small>${esc(you(e.paidBy))} · ${esc(card ? card.name : ((state.accounts || []).find(k => k.id === e.accountId) || {}).name || (e.mode === 'upi' && e.upiApp ? e.upiApp : modeLabel(e.mode)))}${e.mode === 'upi' && e.upiApp && e.accountId ? ' (' + esc(e.upiApp) + ')' : ''} · ${esc(mixed ? e.cats.map(k => cat(k.id).name).join(' + ') : c.name)}${e.platform ? ' · ' + esc(e.platform) + (e.device === 'office' ? ' (office)' : '') : ''}${e.friendsShare ? ' · 👥 ' + money0(e.friendsShare) : ''}${e.createdBy && e.createdBy !== e.paidBy ? ' · added by ' + esc(youL(e.createdBy)) : ''}</small></span>
     <span class="ramt"><b>${money(e.amount)}</b>${tag}</span></button>`;
 }
 function quickList() {
   const since = addDays(today(), -120), m = {};
-  for (const e of spends()) { if (e.date < since || e.recurringId) continue; const k = e.description.toLowerCase(); (m[k] = m[k] || { n: 0, e }).n++; if (e.createdAt > m[k].e.createdAt) m[k].e = e; }
+  for (const e of spends()) { if (e.date < since || e.recurringId || e.amount < 0) continue; const k = e.description.toLowerCase(); (m[k] = m[k] || { n: 0, e }).n++; if (e.createdAt > m[k].e.createdAt) m[k].e = e; }
   return Object.values(m).filter(x => x.n >= 2).sort((a, b) => b.n - a.n).slice(0, 8).map(x => x.e);
 }
 function upcoming() {
   const t = today(), [y, m] = t.split('-').map(Number), lim = addDays(t, 10), out = [];
   for (const r of state.recurring) {
-    if (r.deleted || !r.active) continue;
+    if (r.deleted || !r.active || r.schedule === 'ask') continue;
     let dt = dayOn(y, m, r.dayOfMonth); if (dt <= t) dt = shiftCycle(dt, r.dayOfMonth, 1);
     if (dt <= lim) out.push({ date: dt, icon: cat(r.category).emoji, title: r.description, sub: `${you(r.paidBy)} · recurring`, amt: r.amount });
   }
@@ -557,22 +680,26 @@ const VIEWS = {
   home() {
     const ym = monthOf(today()), st = stats(ym), bal = balance(), ot = otherId(), me0 = meId();
     const open = openItems(), oldest = open.map(e => e.date).sort()[0];
-    const openTxt = open.length ? `${open.length} open expense${open.length > 1 ? 's' : ''} since ${niceDate(oldest)}` : 'Nobody owes anything 🎉';
+    const nPart = open.filter(isPart).length, nExp = open.length - nPart;
+    const openTxt = open.length ? `${nExp} open expense${nExp === 1 ? '' : 's'}${nPart ? ' and ' + nPart + ' part payment' + (nPart > 1 ? 's' : '') : ''} since ${niceDate(oldest)}` : 'Nobody owes anything 🎉';
     const balText = !open.length ? ['All settled up', openTxt] : Math.abs(bal) < 0.005 ? ['You are even', openTxt + ' cancel out'] : bal > 0 ? [`${esc(uname(ot))} owes you`, openTxt] : [`You owe ${esc(uname(ot))}`, openTxt];
     const alerts = cardAlerts().map(a => `<div class="alert ${a.cls}"><span style="font-size:22px">${a.icon}</span><span class="grow"><b>${esc(a.title)}</b><small>${esc(a.text)} · ${esc(you(a.c.owner))}</small></span><button class="btn sm" data-act="markPaid" data-id="${esc(a.c.id)}">Mark paid</button></div>`).join('');
     const tb = Number(S.budgets._total) || 0;
     const stale = open.filter(e => monthOf(e.date) < ym), staleNet = round2(stale.reduce((s, e) => s + lentOf(e), 0));
     const nudge = stale.length ? `<div class="alert info"><span style="font-size:22px">🧮</span><span class="grow"><b>${stale.length} expense${stale.length > 1 ? 's' : ''} from earlier months still open</b><small>${staleNet > 0 ? esc(uname(ot)) + ' owes you ' + money(staleNet) : staleNet < 0 ? 'You owe ' + esc(uname(ot)) + ' ' + money(-staleNet) : 'They cancel out'}</small></span><button class="btn sm" data-act="settleOld">Settle</button></div>` : '';
-    const quick = quickList(), soon = upcoming();
+    const quick = quickList(), soon = upcoming(), asks = askPrompts();
+    const incMe = incomes().filter(e => monthOf(e.date) === ym && e.paidBy === me0).reduce((s, e) => s + e.amount, 0);
+    const askCard = asks.length ? `<div class="card"><h3>Add these?</h3><div class="list">${asks.map(p => `<div class="row"><button class="rmain" data-act="askEdit" data-id="${esc(p.id)}" style="text-align:left"><b>${esc(cat(p.r.category).emoji + ' ' + p.r.description)}</b><small>${esc(dayLabel(p.date))} · ${money(p.r.amount)} · tap to change</small></button><button class="btn sm" data-act="askSkip" data-id="${esc(p.id)}">No</button><button class="btn sm primary" data-act="askAdd" data-id="${esc(p.id)}">Add</button></div>`).join('')}</div></div>` : '';
     const [y, m, d] = today().split('-').map(Number);
     const recent = live().sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt).slice(0, 6);
-    return `${alerts}${nudge}
+    return `${alerts}${nudge}${askCard}
     <div class="card hero"><h3>${balText[0]}</h3><div class="rowflex between"><div><div class="big">${money(Math.abs(bal))}</div><div class="sub">${balText[1]}</div></div>
       ${open.length ? '<button class="btn" data-act="settle">Settle up</button>' : ''}</div></div>
     ${(d => d.length ? `<button class="alert info" data-act="nav" data-v="friends" style="width:100%;text-align:left"><span style="font-size:22px">👥</span><span class="grow"><b>Friends owe ${money(d.reduce((s, x) => s + x.amount, 0))}</b><small>${money(d.filter(x => x.e.paidBy === me0).reduce((s, x) => s + x.amount, 0))} to you · ${money(d.filter(x => x.e.paidBy !== me0).reduce((s, x) => s + x.amount, 0))} to ${esc(uname(ot))}</small></span><span class="muted">›</span></button>` : '')(friendDues())}
     ${quick.length ? `<div class="hscroll">${quick.map(e => `<button class="chip" data-act="quick" data-id="${esc(e.id)}">${esc(cat(e.category).emoji + ' ' + e.description)}</button>`).join('')}</div>` : ''}
     <div class="card"><h3>${esc(monthName(ym))}</h3>
       <div class="kpis"><div class="kpi"><small>Total spent</small><b>${money0(st.total)}</b></div><div class="kpi"><small>Your share</small><b>${money0(st.mine)}</b></div><div class="kpi"><small>${esc(uname(ot))}'s share</small><b>${money0(st.theirs)}</b></div></div>
+      ${incMe ? `<p class="hint">Your money in <b>${money0(incMe)}</b> · your share of spend ${money0(st.mine)} · <b class="${incMe - st.mine >= 0 ? 'pos' : 'neg'}">${money0(Math.abs(incMe - st.mine))} ${incMe - st.mine >= 0 ? 'left' : 'over'}</b></p>` : ''}
       ${tb ? `<div style="margin-top:14px"><div class="rowflex between" style="font-size:13px;margin-bottom:6px"><span class="muted">Budget</span><span><b>${money0(st.total)}</b> of ${money0(tb)}</span></div>${budgetBar(st.total, tb)}<div class="hint">${st.total > tb ? `Over by ${money0(st.total - tb)}` : `${money0((tb - st.total) / Math.max(1, dim(y, m) - d + 1))}/day left for ${dim(y, m) - d + 1} days`}</div></div>` : ''}
     </div>
     ${soon.length ? `<div class="card"><h3>Coming up</h3><div class="list">${soon.map(u => `<div class="row"><span class="ico">${esc(u.icon)}</span><span class="rmain"><b>${esc(u.title)}</b><small>${esc(dayLabel(u.date))} · ${esc(u.sub)}</small></span><span class="ramt"><b>${money(u.amt)}</b></span></div>`).join('')}</div></div>` : ''}
@@ -586,7 +713,7 @@ const VIEWS = {
     return `<div class="monthnav"><button data-act="month" data-n="-1" aria-label="Previous month">‹</button><b>${esc(monthName(ui.month))}</b><button data-act="month" data-n="1" aria-label="Next month">›</button></div>
     <input class="in" id="q" type="search" placeholder="Search description or notes" value="${esc(f.q)}">
     <div class="filters">
-      <select class="in" data-f="who"><option value="">Everyone</option><option value="me" ${f.who === 'me' ? 'selected' : ''}>Paid by you</option><option value="other" ${f.who === 'other' ? 'selected' : ''}>Paid by ${esc(uname(otherId()))}</option><option value="shared" ${f.who === 'shared' ? 'selected' : ''}>Shared only</option><option value="personal" ${f.who === 'personal' ? 'selected' : ''}>Personal only</option><option value="friends" ${f.who === 'friends' ? 'selected' : ''}>With friends</option></select>
+      <select class="in" data-f="who"><option value="">Everyone</option><option value="me" ${f.who === 'me' ? 'selected' : ''}>Paid by you</option><option value="other" ${f.who === 'other' ? 'selected' : ''}>Paid by ${esc(uname(otherId()))}</option><option value="shared" ${f.who === 'shared' ? 'selected' : ''}>Shared only</option><option value="personal" ${f.who === 'personal' ? 'selected' : ''}>Personal only</option><option value="friends" ${f.who === 'friends' ? 'selected' : ''}>With friends</option><option value="income" ${f.who === 'income' ? 'selected' : ''}>Money in</option><option value="transfer" ${f.who === 'transfer' ? 'selected' : ''}>Transfers</option></select>
       <select class="in" data-f="cat"><option value="">All categories</option>${S.cats.map(c => `<option value="${esc(c.id)}" ${f.cat === c.id ? 'selected' : ''}>${esc(c.emoji + ' ' + c.name)}</option>`).join('')}</select>
       <select class="in" data-f="mode"><option value="">All modes</option>${MODES.map(m => `<option value="${m[0]}" ${f.mode === m[0] ? 'selected' : ''}>${m[1]}</option>`).join('')}</select>
       <select class="in" data-f="plat"><option value="">All platforms</option>${[...new Set([...S.platforms, ...spends().map(e => e.platform).filter(Boolean)])].map(n => `<option ${f.plat === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>
@@ -600,7 +727,7 @@ const VIEWS = {
     const elapsed = isCur ? Number(today().slice(8)) : days;
     const pm = addMonth(ym, -1), pTo = Object.entries(stats(pm, ui.basis).byDay).filter(([d]) => Number(d.slice(8)) <= elapsed).reduce((s, x) => s + x[1], 0);
     const delta = pTo ? (st.sum - pTo) / pTo * 100 : null;
-    const cats = Object.entries(st.byCat).sort((a, b) => b[1] - a[1]);
+    const cats = Object.entries(st.byCat).filter(c => c[1] > 0).sort((a, b) => b[1] - a[1]);
     let top = cats.slice(0, 7).map(([id, v], i) => ({ id, label: cat(id).emoji + ' ' + cat(id).name, v, color: PALETTE[i] }));
     const rest = cats.slice(7).reduce((s, c) => s + c[1], 0);
     if (rest > 0) top.push({ id: '', label: 'Everything else', v: rest, color: PALETTE[9] });
@@ -630,6 +757,7 @@ const VIEWS = {
       <div class="card"><h3>Last 6 months</h3><div class="trend">${months.map(x => `<div class="${x.k === ym ? 'cur' : ''}"><b>${x.v ? moneyShort(x.v) : ''}</b><i style="height:${(x.v / maxM * 78).toFixed(1)}%"></i>${monthShort(x.k)}</div>`).join('')}</div></div>
       <div class="card"><h3>How you paid</h3>${modes.map(([id, v]) => `<div class="hb"><span>${esc(modeLabel(id))}</span><div class="bar"><i style="width:${(v / modes[0][1] * 100).toFixed(1)}%"></i></div><b>${money0(v)}</b></div>`).join('')}</div>
     </div>
+    ${(up => up.length ? `<div class="card"><h3>By UPI app</h3>${up.map(([n, v]) => `<div class="hb"><span>${esc(n)}</span><div class="bar"><i style="width:${(v / up[0][1] * 100).toFixed(1)}%"></i></div><b>${money0(v)}</b></div>`).join('')}</div>` : '')(Object.entries(st.list.reduce((m, e) => { if (e.mode === 'upi' && e.upiApp) m[e.upiApp] = (m[e.upiApp] || 0) + (ui.basis === 'mine' ? shareOf(e, me) : spendOf(e)); return m; }, {})).sort((a, b) => b[1] - a[1]))}
     ${(pl => pl.length ? `<div class="card"><h3>By platform</h3>${pl.map(([n, v]) => `<div class="hb"><span>${esc(n)}</span><div class="bar"><i style="width:${(v / pl[0][1] * 100).toFixed(1)}%"></i></div><b>${money0(v)}</b></div>`).join('')}</div>` : '')(Object.entries(st.byPlat).sort((a, b) => b[1] - a[1]))}
     <div class="card"><h3>Who paid, who it was for</h3>
       <div class="rowflex between" style="font-size:13px;margin-bottom:6px"><span>${esc(you(me))} paid <b>${money0(st.paidMe)}</b></span><span>${esc(uname(ot))} paid <b>${money0(st.paidOther)}</b></span></div>
@@ -637,6 +765,8 @@ const VIEWS = {
       <div class="rowflex between" style="font-size:13px;margin:12px 0 6px"><span>Your share <b>${money0(st.mine)}</b></span><span>${esc(uname(ot))}'s share <b>${money0(st.theirs)}</b></span></div>
       <div class="split2"><i style="width:${(st.mine / (st.total || 1) * 100).toFixed(1)}%;background:${esc(ucolor(me))}"></i><i style="flex:1;background:${esc(ucolor(ot))}"></i></div></div>
     ${budCats.length ? `<div class="card"><h3>Budgets (household)</h3>${budCats.map(c => { const sp = stats(ym, 'all').byCat[c.id] || 0, b = Number(bud[c.id]); return `<div style="margin-bottom:12px"><div class="rowflex between" style="font-size:13.5px;margin-bottom:5px"><span>${esc(c.emoji + ' ' + c.name)}</span><span class="${sp > b ? 'neg' : ''}"><b>${money0(sp)}</b> / ${money0(b)}</span></div>${budgetBar(sp, b)}</div>`; }).join('')}</div>` : ''}
+    ${(inc => { if (!inc.length) return ''; const by = {}; inc.forEach(e => (by[e.category] = (by[e.category] || 0) + e.amount)); const tot = inc.reduce((s, e) => s + e.amount, 0);
+      return `<div class="card"><h3>Money in${ui.basis === 'mine' ? ' (yours)' : ''}</h3>${Object.entries(by).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="rowflex between" style="padding:5px 0"><span>${inKind(k)[2]} ${inKind(k)[1]}</span><b>${money0(v)}</b></div>`).join('')}<p class="hint">In ${money0(tot)} · spent ${money0(st.sum)} · <b class="${tot - st.sum >= 0 ? 'pos' : 'neg'}">${money0(Math.abs(tot - st.sum))} ${tot - st.sum >= 0 ? 'left' : 'over'}</b></p></div>`; })(incomes().filter(e => monthOf(e.date) === ym && (ui.basis === 'all' || e.paidBy === me)))}
     <div class="card"><h3>Biggest expenses</h3><div class="list">${big.map(expRow).join('')}</div></div>
     <button class="btn block" data-act="shareSummary">Share this month's summary</button>`}`;
   },
@@ -646,6 +776,7 @@ const VIEWS = {
     const nCards = liveCards().length, nRec = state.recurring.filter(r => !r.deleted && r.active).length;
     return `<div class="card"><div class="list">
       ${item('cards', '💳', 'Credit cards', nCards ? `${nCards} card${nCards > 1 ? 's' : ''} · bill dates and due reminders` : 'Add cards to track bills and due dates')}
+      ${(n => item('accounts', '🏦', 'Bank accounts & money in', n ? `${n} account${n > 1 ? 's' : ''} · salary, refunds, transfers` : 'Add accounts with their UPI apps, log salary and refunds'))(liveAccts().length)}
       ${item('recurring', '🔁', 'Recurring expenses', nRec ? `${nRec} active` : 'Rent, subscriptions, EMIs — added automatically')}
       ${item('budgets', '🎯', 'Budgets', S.budgets._total ? `${money0(S.budgets._total)} per month` : 'Set monthly limits')}
       ${item('categories', '🏷️', 'Categories', `${S.activeCats.length} categories`)}
@@ -654,6 +785,7 @@ const VIEWS = {
     </div></div>
     <div class="card"><div class="list">
       ${meta.sheetUrl && !cfg.demo ? `<a class="row" href="${esc(meta.sheetUrl)}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit"><span class="ico">📗</span><span class="rmain"><b>Open Google Sheet</b><small>Your raw data — edit, filter or pivot it freely</small></span><span class="muted">↗</span></a>` : ''}
+      ${cfg.demo ? '' : '<button class="row" data-act="importCsv"><span class="ico">⬆️</span><span class="rmain"><b>Import expenses</b><small>From your old sheet or a statement (CSV)</small></span></button>'}
       <button class="row" data-act="exportCsv"><span class="ico">⬇️</span><span class="rmain"><b>Export CSV</b><small>Download all expenses</small></span></button>
       ${installEvt ? '<button class="row" data-act="install"><span class="ico">📲</span><span class="rmain"><b>Install app</b><small>Add Tandem to this device</small></span></button>' : ''}
     </div></div>
@@ -670,15 +802,28 @@ const VIEWS = {
         <div style="margin-top:14px"><small>Unbilled · next bill ${niceDate(i.next)}</small><div class="big" style="font-size:26px">${money(i.unbilled)}</div>
         ${c.limit ? `<div class="bar"><i style="width:${Math.min(100, (i.unbilled + (i.paid ? 0 : i.billed)) / c.limit * 100).toFixed(1)}%"></i></div><small>${money0(Math.max(0, c.limit - i.unbilled - (i.paid ? 0 : i.billed)))} available of ${money0(c.limit)}</small>` : ''}</div>
         <div class="st"><div><small>Last bill · ${niceDate(i.stmt)}</small><div><b>${money(i.billed)}</b> ${pill}</div>${i.billed > 0 ? `<small>Pay by ${niceDate(i.due)}</small>` : ''}</div>
-        ${i.billed > 0 ? `<button class="btn sm" data-act="${i.paid ? 'unmarkPaid' : 'markPaid'}" data-id="${esc(c.id)}">${i.paid ? 'Undo' : 'Mark paid'}</button>` : ''}</div></div>`;
+        ${i.billed > 0 ? `<button class="btn sm" data-act="${i.paid ? 'unmarkPaid' : 'markPaid'}" data-id="${esc(c.id)}">${i.paid ? 'Undo' : 'Mark paid'}</button>` : ''}</div>
+        <div class="rowflex between" style="margin-top:10px"><small>${(rc => rc ? 'Checked against statement ✓ ' + money(rc.total) : 'Not checked against the statement yet')(recons()[c.id + '_' + i.stmt])}</small><button class="btn sm" data-act="reconcile" data-kind="card" data-id="${esc(c.id)}">Reconcile</button></div></div>`;
     }).join('') : '<div class="card empty"><b>💳</b>Add a credit card with its bill date and due date.<br>Tandem totals each cycle and reminds you before it is due.</div>'}
     <button class="btn primary block" data-act="editCard">Add credit card</button>
     <p class="hint">Amounts are what you logged on each card, so they may differ slightly from the bank's statement (fees, interest, EMIs).</p>`;
   },
 
+  accounts() {
+    const ym = monthOf(today()), me = meId(), sum = l => l.reduce((s, e) => s + e.amount, 0);
+    const as = liveAccts().sort((a, b) => (a.owner === me ? 0 : 1) - (b.owner === me ? 0 : 1));
+    const loose = incomes().filter(e => monthOf(e.date) === ym && !e.accountId);
+    return `<p class="hint" style="margin:0 0 10px">${esc(monthName(ym))}</p>${as.length ? as.map(a => { const { i, o } = acctFlow(a, e => monthOf(e.date) === ym), since = a.balance0At ? acctFlow(a, e => e.createdAt > a.balance0At) : null;
+      return `<div class="card"><div class="rowflex between"><div class="grow"><b>${esc(a.name)}</b><br><small class="muted">${esc(you(a.owner))}${a.upiApp ? ' · ' + esc(a.upiApp) : ''}</small></div><button class="btn sm" data-act="reconcile" data-kind="acct" data-id="${esc(a.id)}">Reconcile</button><button class="btn sm" data-act="editAcct" data-id="${esc(a.id)}">Edit</button></div>
+        <div class="kpis" style="margin-top:12px"><div class="kpi"><small>Money in</small><b class="pos">${money0(i)}</b></div><div class="kpi"><small>Out</small><b>${money0(o)}</b></div><div class="kpi"><small>Net</small><b class="${i - o < 0 ? 'neg' : ''}">${money0(i - o)}</b></div></div>${since ? `<p class="hint">Balance ≈ <b>${money0(a.balance0 + since.i - since.o)}</b> · from ${money0(a.balance0)} you entered on ${niceDate(toStr(new Date(a.balance0At)))}</p>` : ''}</div>`; }).join('') : '<div class="card empty"><b>🏦</b>Add each bank account with the UPI app you use for it.<br>Then pick the account when you log a payment or money coming in.</div>'}
+    ${loose.length ? `<p class="hint">${money0(sum(loose))} of money in this month is not tied to an account.</p>` : ''}
+    <div class="rowflex"><button class="btn primary grow" data-act="editAcct">Add account</button><button class="btn grow" data-act="addIncome">Add money in</button><button class="btn grow" data-act="addTransfer">Transfer</button></div>
+    <p class="hint">Totals are what you logged against each account this month. For a running balance, open an account and type what it holds today; settlements between the two of you are not counted in it.</p>`;
+  },
+
   recurring() {
     const rs = state.recurring.filter(r => !r.deleted);
-    return `<div class="card">${rs.length ? `<div class="list">${rs.map(r => `<button class="row" data-act="editRec" data-id="${esc(r.id)}"><span class="ico">${esc(cat(r.category).emoji)}</span><span class="rmain"><b>${esc(r.description)}</b><small>Day ${r.dayOfMonth} · ${esc(you(r.paidBy))} · ${esc(modeLabel(r.mode))}${r.active ? '' : ' · paused'}</small></span><span class="ramt"><b>${money(r.amount)}</b></span></button>`).join('')}</div>` : '<div class="empty"><b>🔁</b>Rent, Wi-Fi, streaming, EMIs.<br>Added automatically on the day you choose each month.</div>'}</div>
+    return `<div class="card">${rs.length ? `<div class="list">${rs.map(r => `<button class="row" data-act="editRec" data-id="${esc(r.id)}"><span class="ico">${esc(cat(r.category).emoji)}</span><span class="rmain"><b>${esc(r.description)}</b><small>${r.schedule === 'ask' ? 'Asks ' + esc(dayText(r.days)) + ' from ' + esc(r.askTime) : 'Day ' + r.dayOfMonth} · ${esc(you(r.paidBy))} · ${esc(modeLabel(r.mode))}${r.active ? '' : ' · paused'}</small></span><span class="ramt"><b>${money(r.amount)}</b></span></button>`).join('')}</div>` : '<div class="empty"><b>🔁</b>Rent, Wi-Fi, streaming, EMIs.<br>Added automatically each month, or asked on the days you choose<br>(office lunch, cab) so you just tap Add or No.</div>'}</div>
     <button class="btn primary block" data-act="editRec">Add recurring expense</button>`;
   },
 
@@ -721,8 +866,15 @@ const VIEWS = {
       ${cfg.demo ? '' : '<button class="btn sm" data-act="testEmail">Send test email</button>'}</div>
       <p class="hint">Email reminders arrive even when the app is closed (bill generated, ${S.remind} days before, 1 day before, and on the due date). Device notifications appear when you open the app.</p></div>
     ${cfg.demo ? '' : `<div class="card"><h3>Monthly summary email</h3><div class="seg"><button class="${state.settings.monthlyEmail === false ? '' : 'on'}" data-act="monthlyEmail" data-v="1">On</button><button class="${state.settings.monthlyEmail === false ? 'on' : ''}" data-act="monthlyEmail" data-v="">Off</button></div><p class="hint">On the 1st, each of you gets last month's totals, top categories and what is still open to settle.</p></div>`}
+    ${cfg.demo ? '' : `<div class="card"><h3>Timed prompts when the app is closed</h3><p class="hint" style="margin:0 0 10px">For “Ask me” recurring items: a notification with Add / Not today on Android, or a Shortcuts pop-up on iPhone.</p><button class="btn" data-act="quickSetup">Set up on this phone</button></div>`}
+    ${cfg.demo ? '' : `<div class="card"><h3>Backups</h3><p class="hint" style="margin:0 0 10px">On the 1st of each month a full copy of the sheet is saved to the sheet owner's Google Drive.${meta.lastBackup ? ` Last one made from this device: <a href="${esc(meta.lastBackup.url)}" target="_blank" rel="noopener">${niceDate(toStr(new Date(meta.lastBackup.at)))}</a>.` : ''}</p><button class="btn" data-act="backupNow">Back up now</button></div>`}
     <div class="card"><h3>Currency symbol</h3><input class="in" id="cur" value="${esc(S.cur)}" maxlength="4" style="max-width:120px"></div>
-    ${cfg.demo ? '' : `<div class="card"><h3>Password</h3><label class="f"><span>Current password</span><input class="in" id="pwOld" type="password" autocomplete="current-password"></label><label class="f"><span>New password</span><input class="in" id="pwNew" type="password" autocomplete="new-password"></label><button class="btn" data-act="changePw">Change password</button></div>
+    ${cfg.demo ? '' : `<div class="card"><h3>Google sign-in</h3>
+      ${me.googleEmail ? `<p style="margin-bottom:10px">Linked to <b>${esc(me.googleEmail)}</b>. You can sign in with Google on any device.</p><button class="btn" data-act="unlinkGoogle">Unlink</button>`
+        : state.settings.googleClientId ? '<p class="hint" style="margin:0 0 10px">Link your Google account, then sign in with one tap instead of a password.</p><div id="gLink" style="min-height:44px"></div>'
+        : '<p class="hint" style="margin:0 0 10px">One-time setup: create a free Google client ID (steps in SETUP.md) and paste it here. Then each of you links your Google account.</p>'}
+      <label class="f" style="margin:14px 0 0"><span>Google client ID</span><input class="in" id="gCid" value="${esc(state.settings.googleClientId || '')}" placeholder="…apps.googleusercontent.com" autocapitalize="off" autocomplete="off"></label></div>
+    <div class="card"><h3>Password</h3><label class="f"><span>Current password</span><input class="in" id="pwOld" type="password" autocomplete="current-password"></label><label class="f"><span>New password</span><input class="in" id="pwNew" type="password" autocomplete="new-password"></label><button class="btn" data-act="changePw">Change password</button></div>
     <div class="card"><h3>Partner & devices</h3><p class="hint" style="margin:0 0 10px">Send this link to your partner or open it on your other devices. It connects the app to your sheet; each person still signs in.</p><button class="btn" data-act="shareLink">Copy setup link</button></div>`}
     <div class="card"><h3>This device</h3><div class="chips"><button class="btn" data-act="logout">${cfg.demo ? 'Exit demo' : 'Sign out'}</button><button class="btn danger" data-act="resetDevice">Reset this device</button></div>
     <p class="hint">${queue.length ? queue.length + ' change(s) waiting to sync. ' : ''}${lastSync ? 'Last synced ' + new Date(lastSync).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) + '.' : ''}</p></div>`;
@@ -739,8 +891,10 @@ function expFiltered() {
     if (f.mode && e.mode !== f.mode) return false;
     if (f.who === 'me' && e.paidBy !== me) return false;
     if (f.who === 'other' && e.paidBy === me) return false;
-    const personal = e.type !== 'settlement' && shareOf(e, other(e.paidBy)) === 0;
-    if (f.who === 'shared' && (personal || e.type === 'settlement')) return false;
+    const personal = e.type === 'expense' && shareOf(e, other(e.paidBy)) === 0;
+    if (f.who === 'shared' && (personal || e.type !== 'expense')) return false;
+    if (f.who === 'income' && e.type !== 'income') return false;
+    if (f.who === 'transfer' && e.type !== 'transfer') return false;
     if (f.who === 'personal' && !personal) return false;
     if (f.who === 'friends' && !e.friendsShare) return false;
     return true;
@@ -749,10 +903,10 @@ function expFiltered() {
 function expList() {
   const list = expFiltered(), q = ui.filter.q.trim();
   if (!list.length) return `<div class="empty"><b>🔍</b>${q ? 'No matches.' : 'Nothing here for ' + esc(monthName(ui.month)) + '.'}</div>`;
-  const total = list.filter(e => e.type !== 'settlement').reduce((s, e) => s + e.amount, 0);
+  const total = list.filter(e => e.type === 'expense').reduce((s, e) => s + e.amount, 0);
   let html = `<p class="hint">${list.length} entr${list.length === 1 ? 'y' : 'ies'} · ${money(total)}${q ? ' · all months' : ''}</p><div class="card" style="padding-top:2px">`, cur = '';
   const dayTot = {};
-  list.forEach(e => { if (e.type !== 'settlement') dayTot[e.date] = (dayTot[e.date] || 0) + e.amount; });
+  list.forEach(e => { if (e.type === 'expense') dayTot[e.date] = (dayTot[e.date] || 0) + e.amount; });
   list.slice(0, 400).forEach(e => {
     if (e.date !== cur) { cur = e.date; html += `<div class="dayhead"><span>${esc(dayLabel(e.date))}</span><span>${dayTot[e.date] ? money(dayTot[e.date]) : ''}</span></div>`; }
     html += expRow(e);
@@ -761,7 +915,7 @@ function expList() {
 }
 
 /* ───────────────────────── expense form ───────────────────────── */
-function openExpense(existing, preset) {
+function openExpense(existing, preset, after) {
   const me = meId();
   const f = existing ? { ...existing } : { id: uid(), type: 'expense', date: today(), amount: '', description: '', category: '', paidBy: me, mode: prefs.lastMode || 'upi', cardId: '', splitType: prefs.lastSplit || 'shared', notes: '', ...preset };
   f.payerPct = 50; f.cm = prefs.lastCustom || 'items'; f.own1 = ''; f.own2 = ''; f.ex1 = '';
@@ -849,6 +1003,12 @@ function openExpense(existing, preset) {
     const myCards = liveCards().filter(c => c.owner === f.paidBy);
     if (f.mode === 'credit_card' && !myCards.some(c => c.id === f.cardId)) f.cardId = myCards.length === 1 ? myCards[0].id : (myCards.find(c => c.id === prefs.lastCard) || {}).id || '';
     if (f.mode !== 'credit_card') f.cardId = '';
+    const myAccts = liveAccts().filter(a => a.owner === f.paidBy);
+    if (!ACCT_MODES.includes(f.mode)) f.accountId = '';
+    else if (!existing && !myAccts.some(a => a.id === f.accountId)) f.accountId = myAccts.length === 1 ? myAccts[0].id : (myAccts.find(a => a.id === prefs.lastAcct) || {}).id || '';
+    const acct = myAccts.find(a => a.id === f.accountId);
+    if (f.mode !== 'upi') f.upiApp = '';
+    else if (!existing && !touched.has('upiApp') && !f.upiApp) f.upiApp = (acct && acct.upiApp) || prefs.lastUpi || '';
     const descs = [...new Set(spends().sort((a, b) => b.createdAt - a.createdAt).map(e => e.description).filter(Boolean))].slice(0, 60);
     const stl = locked && state.expenses.find(x => x.id === existing.settledBy);
     let shownCats = allCats ? S.activeCats : catRank.slice(0, 6);
@@ -859,7 +1019,9 @@ function openExpense(existing, preset) {
     const catOpts = sel => `<option value="">Choose category</option>${S.activeCats.concat(sel && !S.activeCats.some(c => c.id === sel) ? [cat(sel)] : []).map(c => `<option value="${esc(c.id)}" ${c.id === sel ? 'selected' : ''}>${esc(c.emoji + ' ' + c.name)}</option>`).join('')}`;
 
     body.innerHTML = `${locked ? `<div class="alert info"><span style="font-size:20px">✅</span><span class="grow"><b>Settled${stl ? ' on ' + niceDate(stl.date) : ''}</b><small>Amount, payer and split are locked. Undo the settlement to change them.</small></span></div>` : ''}
-      <div class="amount"><span>${esc(S.cur)}</span><input id="fAmt" inputmode="decimal" placeholder="0" value="${esc(f.amount)}" autocomplete="off" ${locked ? 'readonly' : ''}>${locked ? '' : '<button type="button" class="plus" data-plus="1" aria-label="Add another amount">+</button>'}</div><p class="hint" id="fCalc" style="margin:-10px 0 12px"></p>
+      ${existing || after || (preset && preset.recurringId) ? '' : '<div class="seg" style="margin-bottom:12px"><button type="button" class="on">Expense</button><button type="button" data-toincome="1">Money in</button><button type="button" data-totransfer="1">Transfer</button></div>'}
+      ${existing ? (r => (r ? `<p class="hint" style="margin:0 0 10px">↩️ ${money(r)} of this has been refunded.</p>` : ''))(refundedOf(existing.id)) : ''}
+      <div class="amount"><span>${esc(S.cur)}</span><input id="fAmt\" inputmode="decimal" placeholder="0" value="${esc(f.amount)}" autocomplete="off" ${locked ? 'readonly' : ''}>${locked ? '' : '<button type="button" class="plus" data-plus="1" aria-label="Add another amount">+</button>'}</div><p class="hint" id="fCalc" style="margin:-10px 0 12px"></p>
       <div class="fsec"><input class="in" id="fDesc" placeholder="What was it for?" value="${esc(f.description)}" list="descs" maxlength="80" autocomplete="off"><datalist id="descs">${descs.map(d => `<option value="${esc(d)}">`).join('')}</datalist></div>
 
       <div class="fsec"><span class="flabel">Category</span>${f.mixed
@@ -872,11 +1034,13 @@ function openExpense(existing, preset) {
         : `<div class="chips">${shownPl.map(n => chip(f.platform === n, `data-plat="${esc(n)}"`, esc(n))).join('')}<button type="button" class="chip ghost" data-platq="1">🔍 Search / add</button></div>`}
         ${f.platform ? `<div class="seg" style="margin-top:10px">${Object.keys(DEVICES).map(k => `<button type="button" class="${f.device === k ? 'on' : ''}" data-set="device" data-val="${k}">${DEVICES[k]}</button>`).join('')}</div>` : ''}</div>
 
-      ${sec('pay', 'Paid by', `${esc(you(f.paidBy))} · ${esc(card ? card.name : modeLabel(f.mode))}${!existing && f.paidBy !== me ? ' · on their behalf' : ''}`,
+      ${sec('pay', 'Paid by', `${esc(you(f.paidBy))} · ${esc(card ? card.name : acct ? acct.name + ' · ' + (f.mode === 'upi' ? f.upiApp || 'UPI' : modeLabel(f.mode)) : f.mode === 'upi' && f.upiApp ? 'UPI · ' + f.upiApp : modeLabel(f.mode))}${!existing && f.paidBy !== me ? ' · on their behalf' : ''}`,
         `<div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.paidBy === id ? 'on' : ''}" data-set="paidBy" data-val="${id}">${esc(you(id))}</button>`).join('')}</div>
         ${!existing && f.paidBy !== me ? `<p class="hint">Adding this on ${esc(uname(f.paidBy))}'s behalf. It counts as paid by ${esc(uname(f.paidBy))} and is marked “added by you”.</p>` : existing && existing.createdBy && existing.createdBy !== existing.paidBy ? `<p class="hint">Added by ${esc(youL(existing.createdBy))} on ${esc(youL(existing.paidBy))}${existing.paidBy === me ? 'r' : "'s"} behalf.</p>` : ''}
         <div class="chips" style="margin-top:10px">${MODES.map(m => chip(f.mode === m[0], `data-set="mode" data-val="${m[0]}"`, m[2] + ' ' + m[1])).join('')}</div>
-        ${f.mode === 'credit_card' ? `<div class="chips" style="margin-top:8px">${myCards.length ? myCards.map(c => chip(f.cardId === c.id, `data-set="cardId" data-val="${esc(c.id)}"`, esc(c.name + (c.last4 ? ' ••' + c.last4 : '')))).join('') : `<span class="hint">No cards saved for ${esc(youL(f.paidBy))} yet. Add them under More → Credit cards to track bills.</span>`}</div>` : ''}`)}
+        ${f.mode === 'upi' ? `<span class="flabel" style="margin-top:12px">UPI app</span><div class="chips">${[...new Set([...upiApps(), f.upiApp].filter(Boolean))].map(n => chip(f.upiApp === n, `data-upiapp="${esc(n)}"`, esc(n))).join('')}<button type="button" class="chip ghost" data-upiadd="1">+ Other</button></div>${myAccts.length ? '<span class="flabel" style="margin-top:12px">From account</span>' : ''}` : ''}
+        ${f.mode === 'credit_card' ? `<div class="chips" style="margin-top:8px">${myCards.length ? myCards.map(c => chip(f.cardId === c.id, `data-set="cardId" data-val="${esc(c.id)}"`, esc(c.name + (c.last4 ? ' ••' + c.last4 : '')))).join('') : `<span class="hint">No cards saved for ${esc(youL(f.paidBy))} yet. Add them under More → Credit cards to track bills.</span>`}</div>` : ''}
+        ${ACCT_MODES.includes(f.mode) && myAccts.length ? `<div class="chips" style="margin-top:${f.mode === 'upi' ? 0 : 8}px">${myAccts.map(a => chip(f.accountId === a.id, `data-set="accountId" data-val="${esc(a.id)}"`, esc(acctLabel(a)))).join('')}</div>` : ''}`)}
 
       ${sec('split', 'Split', esc(splitName),
         `<div class="chips">
@@ -900,7 +1064,7 @@ function openExpense(existing, preset) {
         <input class="in" id="fNotes" placeholder="Notes (optional)" value="${esc(f.notes)}" maxlength="300" style="margin-top:10px">`)}
 
       <div class="stick"><button class="btn primary block" data-save="1">${existing ? 'Save changes' : 'Save expense'}</button>
-      <div class="rowflex" style="margin-top:8px">${existing ? '<button class="btn danger grow" data-del="1">Delete</button><button class="btn grow" data-dup="1">Duplicate</button>' + (!locked && lentOf(existing) ? '<button class="btn grow" data-one="1">Settle this</button>' : '') : '<button class="btn grow" data-save="again">Save & add another</button>'}</div></div>`;
+      <div class="rowflex" style="margin-top:8px;flex-wrap:wrap">${existing ? '<button class="btn danger grow" data-del="1">Delete</button><button class="btn grow" data-dup="1">Duplicate</button><button class="btn grow" data-refund="1">Refund</button>' + (!locked && lentOf(existing) ? '<button class="btn grow" data-one="1">Settle this</button>' : '') : '<button class="btn grow" data-save="again">Save & add another</button>'}</div></div>`;
     upd();
   };
   const upd = () => {
@@ -942,9 +1106,9 @@ function openExpense(existing, preset) {
     if (f.mixed && ca.left < -0.005) return toast('Category amounts add up to more than the total');
     const cal = ca.list.filter(c => c.amount > 0);
     const category = (cal.length > 1 ? cal.slice().sort((x, y) => y.amount - x.amount)[0].id : f.mixed ? (f.parts.find(p => p.id) || {}).id : f.category) || 'other';
-    const row = { id: f.id, type: 'expense', date: f.date, amount: a, description: f.description.trim() || cat(category).name, category, paidBy: f.paidBy, mode: f.mode, cardId: f.cardId, splitType: f.splitType, ...shares(b0), friendsShare: ft, friends: fal.map(p => ({ id: p.id, amount: p.amount, settled: ((existing && existing.friends || []).find(x => x.id === p.id) || {}).settled || '' })), notes: f.notes.trim(), platform: f.platform, device: f.platform ? f.device : '', cats: cal.length > 1 ? cal : [], splitInfo: f.splitType !== 'custom' ? {} : f.cm === 'items' ? { cm: 'items', own1: num(f.own1), own2: num(f.own2) } : f.cm === 'pct' ? { cm: 'pct', pct: f.payerPct } : { cm: 'amounts' }, recurringId: f.recurringId || '', settledBy: f.settledBy || '', createdBy: existing ? existing.createdBy : me, createdAt: f.createdAt || Date.now(), deleted: false };
+    const row = { id: f.id, type: 'expense', date: f.date, amount: a, description: f.description.trim() || cat(category).name, category, paidBy: f.paidBy, mode: f.mode, cardId: f.cardId, accountId: f.accountId || '', upiApp: f.mode === 'upi' ? f.upiApp || '' : '', splitType: f.splitType, ...shares(b0), friendsShare: ft, friends: fal.map(p => ({ id: p.id, amount: p.amount, settled: ((existing && existing.friends || []).find(x => x.id === p.id) || {}).settled || '', paid: ((existing && existing.friends || []).find(x => x.id === p.id) || {}).paid || 0 })), notes: f.notes.trim(), platform: f.platform, device: f.platform ? f.device : '', cats: cal.length > 1 ? cal : [], splitInfo: f.splitType !== 'custom' ? {} : f.cm === 'items' ? { cm: 'items', own1: num(f.own1), own2: num(f.own2) } : f.cm === 'pct' ? { cm: 'pct', pct: f.payerPct } : { cm: 'amounts' }, recurringId: f.recurringId || '', settledBy: f.settledBy || '', createdBy: existing ? existing.createdBy : me, createdAt: f.createdAt || Date.now(), deleted: false };
     if (locked) Object.assign(row, { amount: existing.amount, paidBy: existing.paidBy, splitType: existing.splitType, share1: existing.share1, share2: existing.share2, friendsShare: existing.friendsShare || 0, friends: existing.friends || [], splitInfo: existing.splitInfo || {} });
-    prefs.lastMode = f.paidBy === me ? f.mode : prefs.lastMode; prefs.lastSplit = f.splitType === 'custom' ? 'shared' : f.splitType; if (f.cardId && f.paidBy === me) prefs.lastCard = f.cardId; savePrefs();
+    prefs.lastMode = f.paidBy === me ? f.mode : prefs.lastMode; prefs.lastSplit = f.splitType === 'custom' ? 'shared' : f.splitType; if (f.cardId && f.paidBy === me) prefs.lastCard = f.cardId; if (f.accountId && f.paidBy === me) prefs.lastAcct = f.accountId; if (f.upiApp && f.paidBy === me) prefs.lastUpi = f.upiApp; savePrefs();
     mutate('Expenses', row);
     let msg = existing ? 'Updated' : `Saved ${money(a)}`;
     if (!existing && monthOf(row.date) === monthOf(today())) {
@@ -953,17 +1117,23 @@ function openExpense(existing, preset) {
       chk(st.byCat[category] || 0, Number(bud[category]), cat(category).name); chk(st.total, Number(bud._total), 'Monthly');
     }
     toast(msg);
-    if (again) openExpense(null, { date: f.date, paidBy: f.paidBy }); else closeSheet();
+    if (again) openExpense(null, after ? preset : { date: f.date, paidBy: f.paidBy }, after); else if (after) after(); else closeSheet();
   };
   body.onclick = ev => {
     const hit = sel => ev.target.closest(sel);
+    const ua = hit('[data-upiapp]'); if (ua) { collect(); touched.add('upiApp'); f.upiApp = f.upiApp === ua.dataset.upiapp ? '' : ua.dataset.upiapp; return draw(); }
+    if (hit('[data-upiadd]')) { const n = (prompt('UPI app name') || '').trim().slice(0, 20); if (!n) return; collect(); if (!upiApps().includes(n)) setSetting('upiApps', [...(state.settings.upiApps || []), n]); f.upiApp = n; touched.add('upiApp'); return draw(); }
+    if (hit('[data-toincome]')) { collect(); return openIncome(null, { amount: f.amount, date: f.date }); }
+    if (hit('[data-totransfer]')) { collect(); return openTransfer(null, { amount: f.amount, date: f.date }); }
+    if (hit('[data-refund]')) return openRefund(existing);
     const op = hit('[data-open]'); if (op) { collect(); open.add(op.dataset.open); return draw(); }
     const cl = hit('[data-close]'); if (cl) { collect(); open.delete(cl.dataset.close); return draw(); }
     const s = hit('[data-set]');
     if (s) { if (locked && /paidBy|splitType/.test(s.dataset.set)) return toast('Settled — undo the settlement to change this'); collect(); touched.add(s.dataset.set); const was = shares(), wasFr = frAlloc(); f[s.dataset.set] = s.dataset.val;
+      if (s.dataset.set === 'accountId') { const a = liveAccts().find(x => x.id === f.accountId); if (a && a.upiApp && f.mode === 'upi') f.upiApp = a.upiApp; }
       if (s.dataset.set === 'paidBy' && !existing && !touched.has('mode')) {      // entering for the other person: start from how they usually pay
         const last = f.paidBy === me ? null : spends().filter(e => e.paidBy === f.paidBy).sort((x, y) => y.createdAt - x.createdAt)[0];
-        if (last) { f.mode = last.mode; f.cardId = last.cardId; } else if (f.paidBy === me) { f.mode = prefs.lastMode || 'upi'; f.cardId = ''; }
+        if (last) { f.mode = last.mode; f.cardId = last.cardId; f.accountId = last.accountId || ''; f.upiApp = last.upiApp || ''; } else if (f.paidBy === me) { f.mode = prefs.lastMode || 'upi'; f.cardId = ''; }
       }
       if (s.dataset.set === 'frMode' && f.frMode === 'amounts' && calc(f.amount)) wasFr.forEach(p => (f.fr[p.id] = p.amount));
       if (s.dataset.set === 'cm' && f.cm === 'amounts' && calc(f.amount)) f.ex1 = was.share1;
@@ -1034,7 +1204,7 @@ function openSettle(preIds) {
     <p class="hint" style="margin-bottom:2px">Tick what this payment covers. <span class="pos">+</span> is owed to you, <span class="neg">−</span> is what you owe.</p>
     ${months.map(m => `<button type="button" class="dayhead mhead" data-pick="${m}" style="width:100%"><span>${esc(monthName(m))}</span><span>${money(sum(inMonth(m)))}</span></button><div class="list">${inMonth(m).map(e => `<button type="button" class="row srow" data-tog="${esc(e.id)}"><span class="chk"></span><span class="rmain"><b>${esc(e.description)}</b><small>${niceDate(e.date)} · ${esc(you(e.paidBy))} paid ${money(e.amount)}</small></span><span class="ramt">${signed(lentOf(e))}</span></button>`).join('')}</div>`).join('')}
     <div class="stick"><div class="chips" style="margin-bottom:10px">${[MODES[0], MODES[3], MODES[4]].map(m => chip(m[0] === f.mode, `data-mode="${m[0]}"`, m[2] + ' ' + m[1])).join('')}</div>
-    <button class="btn primary block" data-save="1" id="stBtn"></button></div>`);
+    <button class="btn primary block" data-save="1" id="stBtn"></button><button class="btn block" data-part="1" style="margin-top:8px">Pay a part instead</button></div>`);
   const chosen = () => items.filter(e => sel.has(e.id));
   const refresh = () => {
     const c = chosen(), n = sum(c);
@@ -1050,6 +1220,7 @@ function openSettle(preIds) {
   body.onclick = ev => {
     const t = ev.target.closest('[data-tog]');
     if (t) { sel.has(t.dataset.tog) ? sel.delete(t.dataset.tog) : sel.add(t.dataset.tog); return refresh(); }
+    if (ev.target.closest('[data-part]')) return openPart();
     const p = ev.target.closest('[data-pick]');
     if (p) { const k = p.dataset.pick; sel.clear(); if (k === 'all') items.forEach(e => sel.add(e.id)); else if (k !== 'none') inMonth(k).forEach(e => sel.add(e.id)); return refresh(); }
     const m = ev.target.closest('[data-mode]');
@@ -1080,8 +1251,8 @@ function openFriend(id) {
   const tot = l => round2(l.reduce((s, x) => s + x.amount, 0));
   const body = openSheet(fr.name, `
     <div class="card hero" style="margin-bottom:10px"><h3>${esc(fr.name)} owes</h3><div class="big">${money(tot(items))}</div><div class="sub">${money(tot(items.filter(x => x.e.paidBy === me)))} to you · ${money(tot(items.filter(x => x.e.paidBy !== me)))} to ${esc(uname(otherId()))}</div></div>
-    ${items.length ? `<p class="hint">Tick what ${esc(fr.name)} has paid back.</p><div class="list">${items.map(x => `<button type="button" class="row srow on" data-tog="${esc(x.e.id)}"><span class="chk"></span><span class="rmain"><b>${esc(x.e.description)}</b><small>${niceDate(x.e.date)} · ${esc(you(x.e.paidBy))} paid ${money(x.e.amount)}</small></span><span class="ramt"><b>${money(x.amount)}</b></span></button>`).join('')}</div>` : '<div class="empty"><b>✅</b>Nothing pending.</div>'}
-    <div class="stick">${items.length ? '<button class="btn primary block" data-recv="1" id="frBtn"></button><button class="btn block" data-stmt="1" style="margin-top:8px">Share statement</button>' : ''}
+    ${items.length ? `<p class="hint">Tick what ${esc(fr.name)} has paid back.</p><div class="list">${items.map(x => `<button type="button" class="row srow on" data-tog="${esc(x.e.id)}"><span class="chk"></span><span class="rmain"><b>${esc(x.e.description)}</b><small>${niceDate(x.e.date)} · ${esc(you(x.e.paidBy))} paid ${money(x.e.amount)}</small></span><span class="ramt"><b>${money(x.amount)}</b>${x.full > x.amount ? `<small class="muted">of ${money(x.full)}</small>` : ''}</span></button>`).join('')}</div>` : '<div class="empty"><b>✅</b>Nothing pending.</div>'}
+    <div class="stick">${items.length ? '<button class="btn primary block" data-recv="1" id="frBtn"></button><div class="rowflex" style="margin-top:8px"><button class="btn grow" data-frpart="1">Received a part</button><button class="btn grow" data-stmt="1">Share statement</button></div>' : ''}
     <div class="rowflex" style="margin-top:8px"><button class="btn grow" data-ren="1">Rename</button><button class="btn danger grow" data-rm="1">Remove</button></div></div>`);
   const refresh = () => { const b = $('#frBtn', body); if (!b) return; const c = items.filter(x => sel.has(x.e.id)); $$('[data-tog]', body).forEach(r => r.classList.toggle('on', sel.has(r.dataset.tog))); b.disabled = !c.length; b.textContent = c.length ? `Mark ${money(tot(c))} received` : 'Select items'; };
   body.onclick = ev => {
@@ -1091,6 +1262,14 @@ function openFriend(id) {
       const c = items.filter(x => sel.has(x.e.id));
       c.forEach(x => mutate('Expenses', { ...x.e, friends: x.e.friends.map(p => (p.id === id ? { ...p, settled: today() } : p)) }, true));
       closeSheet(); render(); return toast(`${money(tot(c))} from ${fr.name} marked received`);
+    }
+    if (ev.target.closest('[data-frpart]')) {
+      const mine = items.filter(x => x.e.paidBy === me).sort((x, y) => x.e.date.localeCompare(y.e.date)); if (!mine.length) return toast(`${fr.name} owes you nothing directly`);
+      let left = round2(calc(prompt(`How much did ${fr.name} pay you? (owes you ${money(tot(mine))})`) || '')); if (!(left > 0)) return;
+      const got = Math.min(left, tot(mine));
+      for (const x of mine) { if (left <= 0.005) break; const take = Math.min(left, x.amount); left = round2(left - take);
+        mutate('Expenses', { ...x.e, friends: x.e.friends.map(p => (p.id === id ? { ...p, paid: round2((p.paid || 0) + take), settled: (p.paid || 0) + take >= p.amount - 0.005 ? today() : '' } : p)) }, true); }
+      closeSheet(); render(); return toast(`${money(got)} from ${fr.name} recorded, oldest first`);
     }
     if (ev.target.closest('[data-stmt]')) return share(friendStatement(id), 'Statement copied');
     if (ev.target.closest('[data-ren]')) { const name = (prompt('Name', fr.name) || '').trim().slice(0, 30); if (name) { setSetting('friends', friendsAll().map(x => (x.id === id ? { ...x, name } : x))); closeSheet(); render(); } return; }
@@ -1103,12 +1282,14 @@ function openFriend(id) {
 function openSettlement(s) {
   const covered = state.expenses.filter(e => e.settledBy === s.id && !e.deleted).sort((a, b) => b.date.localeCompare(a.date));
   const body = openSheet('Settlement', `
-    <div class="card hero" style="margin-bottom:10px"><h3>${esc(you(s.paidBy))} paid ${esc(youL(other(s.paidBy)))}</h3><div class="big">${money(s.amount)}</div><div class="sub">${niceDate(s.date)} · ${esc(modeLabel(s.mode))} · covers ${covered.length} expense${covered.length === 1 ? '' : 's'}</div></div>
+    <div class="card hero" style="margin-bottom:10px"><h3>${esc(you(s.paidBy))} paid ${esc(youL(other(s.paidBy)))}</h3><div class="big">${money(s.amount)}</div><div class="sub">${niceDate(s.date)} · ${esc(modeLabel(s.mode))} · ${isPart(s) ? (s.settledBy ? 'part payment, used in a later settlement' : 'part payment, still open: it comes off the next settlement') : 'covers ' + covered.length + ' item' + (covered.length === 1 ? '' : 's')}</div></div>
     <div class="list">${covered.map(e => { const v = lentOf(e); return `<div class="row"><span class="ico">${esc(cat(e.category).emoji)}</span><span class="rmain"><b>${esc(e.description)}</b><small>${niceDate(e.date)} · ${esc(you(e.paidBy))} paid ${money(e.amount)}</small></span><span class="ramt"><b class="${v > 0 ? 'pos' : 'neg'}">${v > 0 ? '+' : '−'}${money(Math.abs(v))}</b></span></div>`; }).join('')}</div>
     <button class="btn danger block" data-undo="1" style="margin-top:14px">Undo this settlement</button>
     <p class="hint">Undoing reopens these expenses so they count towards the balance again.</p>`);
   body.onclick = ev => {
-    if (!ev.target.closest('[data-undo]') || !confirm('Undo this settlement and reopen its expenses?')) return;
+    if (!ev.target.closest('[data-undo]')) return;
+    if (s.settledBy) return toast('This part payment was used in a later settlement. Undo that one first.');
+    if (!confirm(isPart(s) ? 'Remove this part payment?' : 'Undo this settlement and reopen its expenses?')) return;
     state.expenses.filter(e => e.settledBy === s.id).forEach(e => mutate('Expenses', { ...e, settledBy: '' }, true));
     mutate('Expenses', { ...s, deleted: true }, true);
     closeSheet(); render(); toast('Settlement undone');
@@ -1136,19 +1317,417 @@ function openCard(c) {
   draw();
 }
 
-function openRec(r) {
-  const f = r ? { ...r } : { id: uid(), description: '', amount: '', category: 'utilities', paidBy: meId(), mode: 'upi', cardId: '', splitType: 'shared', payerPct: 50, dayOfMonth: 1, active: true };
-  const body = openSheet(r ? 'Edit recurring' : 'Add recurring expense', '');
-  const collect = () => { f.description = $('#rDesc', body).value; f.amount = $('#rAmt', body).value; f.dayOfMonth = Number($('#rDay', body).value); f.category = $('#rCat', body).value; f.mode = $('#rMode', body).value; f.cardId = ($('#rCard', body) || {}).value || ''; };
+function openPart() {
+  const me = meId(), bal = balance();
+  const f = { paidBy: bal < 0 ? me : otherId(), mode: 'upi' };
+  const body = openSheet('Part payment', '');
+  const draw = amt => { body.innerHTML = `<p class="hint" style="margin:0 0 12px">${Math.abs(bal) < 0.005 ? 'You are even right now.' : esc(bal > 0 ? uname(otherId()) + ' owes you ' : 'You owe ' + uname(otherId()) + ' ') + money(Math.abs(bal))}. A part payment stays on the books and comes off the next settlement.</p>
+      <div class="amount"><span>${esc(S.cur)}</span><input id="ppAmt" inputmode="decimal" placeholder="0" value="${esc(amt || '')}"></div>
+      <div class="fsec"><span class="flabel">Who is paying</span><div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.paidBy === id ? 'on' : ''}" data-set="paidBy" data-val="${id}">${esc(you(id))} → ${esc(youL(other(id)))}</button>`).join('')}</div></div>
+      <div class="fsec"><div class="chips">${[MODES[0], MODES[3], MODES[4]].map(m => chip(f.mode === m[0], `data-set="mode" data-val="${m[0]}"`, m[2] + ' ' + m[1])).join('')}</div></div>
+      <button class="btn primary block" data-save="1">Record part payment</button>`; };
+  body.onclick = ev => {
+    const s = ev.target.closest('[data-set]'); if (s) { const v = $('#ppAmt', body).value; f[s.dataset.set] = s.dataset.val; return draw(v); }
+    if (!ev.target.closest('[data-save]')) return;
+    const a = round2(calc($('#ppAmt', body).value)); if (!(a > 0)) return toast('Enter an amount');
+    mutate('Expenses', { id: 'p' + uid(), type: 'settlement', date: today(), amount: a, description: 'Part payment', category: 'part', paidBy: f.paidBy, mode: f.mode, cardId: '', splitType: '', share1: 0, share2: 0, notes: '', recurringId: '', settledBy: '', createdAt: Date.now(), deleted: false });
+    closeSheet(); toast(`Part payment of ${money(a)} recorded`);
+  };
+  draw();
+}
+
+function openTransfer(existing, preset) {
+  const me = meId();
+  const f = existing ? { ...existing } : { id: uid(), amount: '', category: 'card_bill', paidBy: me, accountId: '', toAccountId: '', cardId: '', date: today(), notes: '', ...preset };
+  const body = openSheet(existing ? 'Edit transfer' : 'Add transfer', '');
+  const collect = () => { f.amount = $('#tAmt', body).value; f.date = $('#tDate', body).value || f.date; f.notes = $('#tNotes', body).value; };
   const draw = () => {
-    const cards = liveCards().filter(c => c.owner === f.paidBy), sp = S.split, o = other(f.paidBy);
-    body.innerHTML = `<div class="amount"><span>${esc(S.cur)}</span><input id="rAmt" inputmode="decimal" value="${esc(f.amount)}" placeholder="0"></div>
-      <label class="f"><span>Description</span><input class="in" id="rDesc" value="${esc(f.description)}" placeholder="e.g. Rent, Netflix" maxlength="80"></label>
+    const accts = liveAccts().filter(a => a.owner === f.paidBy), cards = liveCards().sort((a, b) => (a.owner === f.paidBy ? 0 : 1) - (b.owner === f.paidBy ? 0 : 1));
+    if (!existing && !accts.some(a => a.id === f.accountId)) f.accountId = accts.length === 1 ? accts[0].id : (accts.find(a => a.id === prefs.lastAcct) || {}).id || '';
+    body.innerHTML = `${existing ? '' : '<div class="seg" style="margin-bottom:12px"><button type="button" data-toexpense="1">Expense</button><button type="button" data-toincome="1">Money in</button><button type="button" class="on">Transfer</button></div>'}
+      <div class="amount"><span>${esc(S.cur)}</span><input id="tAmt" inputmode="decimal" placeholder="0" value="${esc(f.amount)}" autocomplete="off"></div>
+      <div class="fsec"><span class="flabel">What kind</span><div class="chips">${TR_KINDS.map(k => chip(f.category === k[0], `data-set="category" data-val="${k[0]}"`, k[2] + ' ' + k[1])).join('')}</div><p class="hint">Moving your own money. It is not counted as spending or as money in.</p></div>
+      <div class="fsec"><span class="flabel">Whose money</span><div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.paidBy === id ? 'on' : ''}" data-set="paidBy" data-val="${id}">${esc(you(id))}</button>`).join('')}</div></div>
+      <div class="fsec"><span class="flabel">From account</span>${accts.length ? `<div class="chips">${accts.map(a => chip(f.accountId === a.id, `data-set="accountId" data-val="${esc(a.id)}"`, esc(a.name))).join('')}</div>` : `<p class="hint" style="margin:0">No accounts saved for ${esc(youL(f.paidBy))} yet (More → Bank accounts). You can still record it.</p>`}</div>
+      ${f.category === 'card_bill' ? `<div class="fsec"><span class="flabel">Which card</span>${cards.length ? `<div class="chips">${cards.map(c => { const i = cardInfo(c); return chip(f.cardId === c.id, `data-set="cardId" data-val="${esc(c.id)}"`, esc(c.name) + (i.billed > 0 && !i.paid ? ' · ' + money0(i.billed) + ' due' : '')); }).join('')}</div><p class="hint">Saving this also marks the card's current bill as paid.</p>` : '<p class="hint" style="margin:0">Add the card first under More → Credit cards.</p>'}</div>` : ''}
+      ${f.category === 'own' ? `<div class="fsec"><span class="flabel">To account</span><div class="chips">${liveAccts().filter(a => a.id !== f.accountId).map(a => chip(f.toAccountId === a.id, `data-set="toAccountId" data-val="${esc(a.id)}"`, esc(a.name + (a.owner === f.paidBy ? '' : ' (' + uname(a.owner) + ')')))).join('') || '<span class="hint">Add a second account first.</span>'}</div></div>` : ''}
+      <div class="fsec"><div class="rowflex"><input class="in" type="date" id="tDate" value="${esc(f.date)}" max="2099-12-31"><input class="in" id="tNotes" placeholder="Notes" value="${esc(f.notes)}" maxlength="300"></div></div>
+      <div class="stick"><button class="btn primary block" data-save="1">${existing ? 'Save changes' : 'Save transfer'}</button>${existing ? '<button class="btn danger block" data-del="1" style="margin-top:8px">Delete</button>' : ''}</div>`;
+  };
+  const save = () => {
+    collect(); const a = round2(calc(f.amount)), k = f.category;
+    if (!(a > 0)) { toast('Enter an amount'); return $('#tAmt', body).focus(); }
+    const card = liveCards().find(c => c.id === f.cardId), from = liveAccts().find(x => x.id === f.accountId), to = liveAccts().find(x => x.id === f.toAccountId);
+    if (k === 'card_bill' && !card) return toast('Choose the card');
+    if (k === 'own' && (!to || to.id === f.accountId)) return toast('Choose the account it went to');
+    const description = k === 'card_bill' ? `${card.name} bill` : k === 'own' ? `${from ? from.name : 'Account'} → ${to.name}` : 'Cash withdrawal';
+    mutate('Expenses', { id: f.id, type: 'transfer', date: f.date, amount: a, description, category: k, paidBy: f.paidBy, mode: '', cardId: k === 'card_bill' ? card.id : '', accountId: f.accountId || '', toAccountId: k === 'own' ? to.id : '', splitType: '', share1: 0, share2: 0, notes: f.notes.trim(), recurringId: '', settledBy: '', createdBy: existing ? existing.createdBy : me, createdAt: f.createdAt || Date.now(), deleted: false }, true);
+    if (k === 'card_bill' && !existing) { const i = cardInfo(card); if (i.billed > 0 && !i.paid) mutate('BillPayments', { id: card.id + '_' + i.stmt, cardId: card.id, cycle: i.stmt, paidOn: today(), paidBy: f.paidBy, deleted: false }, true); }
+    closeSheet(); render(); toast(existing ? 'Updated' : `Transfer of ${money(a)} saved`);
+  };
+  body.onclick = ev => {
+    const s = ev.target.closest('[data-set]');
+    if (s) { collect(); f[s.dataset.set] = s.dataset.val;
+      if (s.dataset.set === 'cardId' && !calc(f.amount)) { const c = liveCards().find(x => x.id === f.cardId), i = c && cardInfo(c); if (i && i.billed > 0 && !i.paid) f.amount = i.billed; }
+      return draw(); }
+    if (ev.target.closest('[data-toexpense]')) { collect(); return openExpense(null, { amount: f.amount, date: f.date }); }
+    if (ev.target.closest('[data-toincome]')) { collect(); return openIncome(null, { amount: f.amount, date: f.date }); }
+    if (ev.target.closest('[data-save]')) return save();
+    if (ev.target.closest('[data-del]') && confirm('Delete this transfer?')) { mutate('Expenses', { ...existing, deleted: true }); closeSheet(); toast('Deleted', { label: 'Undo', fn: () => mutate('Expenses', { ...existing, deleted: false }) }); }
+  };
+  body.onkeydown = ev => { if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') { ev.preventDefault(); save(); } };
+  draw();
+  if (!existing) setTimeout(() => { const i = $('#tAmt', body); i && i.focus(); }, 60);
+}
+
+/* a refund is a negative copy of the expense, split the same way, so spending, card bills and what you owe each other all correct themselves */
+function openRefund(orig, existing) {
+  if (existing) {
+    const o = state.expenses.find(e => e.id === existing.refundOf);
+    const body = openSheet('Refund', `<div class="card hero" style="margin-bottom:10px"><h3>Refund received</h3><div class="big">${money(-existing.amount)}</div><div class="sub">${niceDate(existing.date)} · ${esc(o ? 'for ' + o.description + ' (' + money(o.amount) + ')' : existing.description)}</div></div>
+      <p class="hint">Your shares went down by ${money(-existing.share1)} (${esc(uname('u1'))}) and ${money(-existing.share2)} (${esc(uname('u2'))}).${existing.settledBy ? ' Already settled between you.' : ''}</p>
+      <button class="btn danger block" data-del="1">Delete this refund</button>`);
+    body.onclick = ev => { if (!ev.target.closest('[data-del]')) return; if (existing.settledBy) return toast('Settled — undo the settlement first'); if (confirm('Delete this refund?')) { mutate('Expenses', { ...existing, deleted: true }); closeSheet(); toast('Refund deleted'); } };
+    return;
+  }
+  const left = round2(orig.amount - refundedOf(orig.id));
+  if (!(left > 0)) return toast('This expense is already fully refunded');
+  const base = orig.share1 + orig.share2, r1 = base ? orig.share1 / base : orig.paidBy === 'u1' ? 1 : 0;
+  const body = openSheet('Refund', `<p class="hint" style="margin:0 0 12px">For <b>${esc(orig.description)}</b> (${money(orig.amount)}${left < orig.amount ? ', ' + money(left) + ' not yet refunded' : ''}). It goes back the way it was paid and is split the same way.</p>
+    <div class="amount"><span>${esc(S.cur)}</span><input id="rfAmt" inputmode="decimal" value="${left}"></div>
+    <div class="fsec"><span class="flabel">Date received</span><input class="in" type="date" id="rfDate" value="${today()}"></div>
+    <p class="hint" id="rfSum"></p>
+    <button class="btn primary block" data-save="1">Record refund</button>`);
+  const split = a => { const s1 = round2(a * r1); return [s1, round2(a - s1)]; };
+  const upd = () => { const a = round2(calc($('#rfAmt', body).value)), [s1, s2] = split(a); $('#rfSum', body).textContent = a > 0 ? `${uname('u1')}'s share drops by ${money(s1)}, ${uname('u2')}'s by ${money(s2)}.` : ''; };
+  body.oninput = upd; upd();
+  body.onclick = ev => {
+    if (!ev.target.closest('[data-save]')) return;
+    const a = round2(calc($('#rfAmt', body).value)); if (!(a > 0)) return toast('Enter an amount'); if (a > left + 0.005) return toast(`Only ${money(left)} is left to refund`);
+    const [s1, s2] = split(a);
+    mutate('Expenses', { id: 'rf' + uid(), type: 'expense', date: $('#rfDate', body).value || today(), amount: -a, description: 'Refund: ' + orig.description, category: orig.category, paidBy: orig.paidBy, mode: orig.mode, cardId: orig.cardId, accountId: orig.accountId, upiApp: orig.upiApp, splitType: 'custom', splitInfo: { cm: 'amounts' }, share1: -s1, share2: -s2, friendsShare: 0, friends: [], notes: '', platform: orig.platform, device: orig.device, cats: [], refundOf: orig.id, recurringId: '', settledBy: '', createdAt: Date.now(), deleted: false });
+    closeSheet(); toast(`Refund of ${money(a)} recorded`);
+  };
+}
+
+/* ---- reconcile: compare what was logged with the real statement total (card) or bank balance (account) */
+function openReconcile(kind, id) {
+  const isCard = kind === 'card', sum = l => round2(l.reduce((s, e) => s + e.amount, 0));
+  const get = () => (isCard ? liveCards() : liveAccts()).find(x => x.id === id);
+  if (!get()) return;
+  const dk = kind + id; let showList = false;
+  const body = openSheet('Reconcile ' + get().name, '');
+  const back = () => openReconcile(kind, id);
+  const ctx = () => {
+    const t = get();
+    if (isCard) { const i = cardInfo(t), ps = shiftCycle(i.stmt, t.statementDay, -1), list = spends().filter(e => e.cardId === t.id && e.date > ps && e.date <= i.stmt); return { t, list, logged: sum(list), rid: t.id + '_' + i.stmt, date: i.stmt, from: addDays(ps, 1) }; }
+    const tracked = !!t.balance0At, fl = tracked ? acctFlow(t, e => e.createdAt > t.balance0At) : { i: 0, o: 0 };
+    return { t, tracked, expected: round2(t.balance0 + fl.i - fl.o), list: tracked ? live().filter(e => e.createdAt > t.balance0At && (e.accountId === t.id || e.toAccountId === t.id)) : [], rid: t.id + '_' + today(), date: today() };
+  };
+  const personal = (c, amount, extra) => ({ id: 'rc' + uid(), type: 'expense', date: c.date, amount, paidBy: c.t.owner, splitType: 'personal', ...computeShares(amount, c.t.owner, 'personal', 100), mode: isCard ? 'credit_card' : 'upi', cardId: isCard ? c.t.id : '', accountId: isCard ? '' : c.t.id, notes: 'Added while reconciling', recurringId: '', settledBy: '', createdAt: Date.now(), deleted: false, ...extra });
+  const finish = (c, total, msg) => {
+    if (isCard) setRecon(c.rid, total);
+    else { mutate('Accounts', { ...c.t, balance0: total, balance0At: Date.now() + 1 }, true); setRecon(c.rid, total); }
+    delete reconDraft[dk]; closeSheet(); render(); toast(msg || 'Reconciled ✓');
+  };
+  const draw = () => {
+    const c = ctx(), raw = reconDraft[dk] ?? '', has = String(raw).trim() !== '', total = round2(calc(raw));
+    const gap = !has ? 0 : isCard ? round2(total - c.logged) : round2(c.expected - total), ok = has && Math.abs(gap) < 0.5, done = recons()[c.rid];
+    const who = c.t.owner === meId() ? 'you' : uname(c.t.owner);
+    let box = '';
+    if (!has) box = '';
+    else if (!isCard && !c.tracked) box = `<div class="alert info"><span class="grow"><b>Start tracking from ${money(total)}</b><small>From now on Tandem compares what you log with this balance.</small></span></div><button class="btn primary block" data-done="1">Start tracking</button>`;
+    else if (ok) box = `<div class="alert info"><span style="font-size:22px">✅</span><span class="grow"><b>It matches</b><small>Everything on this ${isCard ? 'bill' : 'account'} is logged.</small></span></div><button class="btn primary block" data-done="1">Mark reconciled</button>`;
+    else if (gap > 0) box = `<div class="alert"><span style="font-size:22px">🔎</span><span class="grow"><b>${money(gap)} is not logged</b><small>${isCard ? 'The bill is higher than what you logged for this cycle.' : 'The bank has less than Tandem expected, so some spending is missing.'}</small></span></div>
+      <button class="btn primary block" data-miss="1">Add a missing transaction</button>
+      ${isCard ? '<button class="btn block" data-fees="1" style="margin-top:8px">It is fees / interest</button>' : ''}<button class="btn block" data-unacc="1" style="margin-top:8px">Book ${money(gap)} as Unaccounted</button>
+      <p class="hint">Add what you remember; the gap shrinks each time. “Unaccounted” books the rest against ${esc(who)} only, not split, and closes the ${isCard ? 'bill' : 'month'}.</p>`;
+    else box = `<div class="alert bad"><span style="font-size:22px">↩️</span><span class="grow"><b>${isCard ? 'You logged ' + money(-gap) + ' more than the bill' : money(-gap) + ' more in the bank than expected'}</b><small>${isCard ? 'Usually a refund, something logged on the wrong card, or a purchase that falls in the next bill. Check the list below.' : 'Usually money in that was not logged: a refund, a transfer, interest.'}</small></span></div>
+      ${isCard ? '' : '<button class="btn primary block" data-inc="1">Add money in</button>'}
+      <button class="btn block" data-credit="1" style="margin-top:8px">Book ${money(-gap)} as ${isCard ? 'a statement credit' : 'unaccounted money in'}</button>`;
+    body.innerHTML = `<p class="hint" style="margin:0 0 10px">${isCard ? `Bill generated ${niceDate(c.date)} (purchases ${niceDate(c.from)} – ${niceDate(c.date)}). You logged <b>${money(c.logged)}</b> across ${c.list.length} entr${c.list.length === 1 ? 'y' : 'ies'}.` : c.tracked ? `Tandem expects <b>${money(c.expected)}</b> in this account from what you logged.` : 'This account is not being tracked yet.'}${done ? ` Last reconciled ${niceDate(done.at)} at ${money(done.total)}.` : ''}</p>
+      <label class="f"><span>${isCard ? 'Total on the statement' : 'Balance in the bank right now'}</span><input class="in" id="rcTotal" inputmode="decimal" placeholder="0" value="${esc(raw)}" autocomplete="off"></label>
+      ${box}
+      <button class="btn block" data-match="1" style="margin-top:8px">Match a statement file instead</button>
+      ${c.list.length ? `<button class="crow" data-list="1" style="margin-top:12px"><span>Logged ${isCard ? 'in this bill' : 'since last check'}</span><b>${c.list.length} entr${c.list.length === 1 ? 'y' : 'ies'}</b><i>${showList ? '▴' : '›'}</i></button>${showList ? `<div class="card" style="padding:2px 14px"><div class="list">${c.list.slice().sort((a, b) => b.date.localeCompare(a.date)).map(expRow).join('')}</div></div>` : ''}` : ''}`;
+  };
+  body.oninput = ev => { if (ev.target.id === 'rcTotal') reconDraft[dk] = ev.target.value; };
+  body.onchange = ev => { if (ev.target.id === 'rcTotal') draw(); };
+  body.onkeydown = ev => { if (ev.key === 'Enter' && ev.target.id === 'rcTotal') { ev.preventDefault(); draw(); } };
+  body.onclick = ev => {
+    const hit = s => ev.target.closest(s); if (hit('#rcTotal')) return;
+    const c = ctx(), raw = reconDraft[dk] ?? '', total = round2(calc(raw)), gap = isCard ? round2(total - c.logged) : round2(c.expected - total);
+    if (hit('[data-list]')) { showList = !showList; return draw(); }
+    if (hit('[data-match]')) return openMatch(kind, id);
+    if (String(raw).trim() === '') return;
+    if (hit('[data-done]')) return finish(c, total, !isCard && !c.tracked ? 'Tracking this balance from now' : undefined);
+    if (hit('[data-miss]')) return openExpense(null, isCard ? { date: c.date, paidBy: c.t.owner, mode: 'credit_card', cardId: c.t.id } : { paidBy: c.t.owner, mode: 'upi', accountId: c.t.id }, back);
+    if (hit('[data-inc]')) return openIncome(null, { paidBy: c.t.owner, accountId: c.t.id, category: 'other_in' }, back);
+    if (hit('[data-fees]')) { const a = round2(calc(prompt('Fees and interest on this bill', String(gap)) || '')); if (!(a > 0)) return; mutate('Expenses', personal(c, a, { description: 'Card fees & interest', category: 'fees' }), true); render(); toast(`${money(a)} fees added`); return draw(); }
+    if (hit('[data-unacc]') && gap > 0) { mutate('Expenses', personal(c, gap, { description: 'Unaccounted (' + c.t.name + ')', category: 'unaccounted', notes: `${isCard ? 'Statement' : 'Bank balance'} ${money(total)}; could not be matched to logged entries` }), true); return finish(c, total, `${money(gap)} booked as Unaccounted`); }
+    if (hit('[data-credit]') && gap < 0) {
+      if (isCard) mutate('Expenses', personal(c, gap, { description: 'Statement credit (' + c.t.name + ')', category: 'unaccounted', notes: 'Logged more than the statement total' }), true);
+      else mutate('Expenses', { id: 'rc' + uid(), type: 'income', date: today(), amount: -gap, description: 'Unaccounted money in', category: 'other_in', paidBy: c.t.owner, mode: '', cardId: '', accountId: c.t.id, splitType: '', share1: 0, share2: 0, notes: 'Added while reconciling', recurringId: '', settledBy: '', createdAt: Date.now(), deleted: false }, true);
+      return finish(c, total, `${money(-gap)} booked`);
+    }
+  };
+  draw();
+  if (!reconDraft[dk]) setTimeout(() => { const i = $('#rcTotal', body); i && i.focus(); }, 60);
+}
+
+/* ---- match a downloaded statement (CSV) against what was logged, and list only what is missing */
+function openMatch(kind, id) {
+  const isCard = kind === 'card', t = (isCard ? liveCards() : liveAccts()).find(x => x.id === id); if (!t) return;
+  const FIELDS = [['date', 'Date', /date/i], ['desc', 'Description', /desc|narration|particular|detail|merchant|transaction|remark/i], ['debit', 'Amount spent / debit', /debit|withdraw|amount|spent|paid out/i], ['credit', 'Credit / deposit (optional)', /credit|deposit|paid in/i]];
+  let data = null, map = {}, split = 'shared', off = new Set();
+  const body = openSheet('Match statement · ' + t.name, '');
+  const amt = v => round2(num(String(v || '').replace(/[^\d.,-]/g, '')));
+  const analyse = () => {
+    const mine = spends().filter(e => (isCard ? e.cardId : e.accountId) === t.id && e.amount > 0), used = new Set(), seen = {}, missing = [], dates = [];
+    let matched = 0, credits = 0;
+    for (const r of data.rows) {
+      const date = parseDate(r[map.date]), rawD = String(r[map.debit] || ''); let a = amt(rawD);
+      if (!date || !a) continue;
+      if (a < 0 || /cr\b/i.test(rawD) || (map.credit !== '' && amt(r[map.credit]) > 0 && !(a > 0))) { credits++; continue; }
+      dates.push(date);
+      const hit = mine.find(e => !used.has(e.id) && Math.abs(e.amount - a) <= 1 && Math.abs(diffDays(e.date, date)) <= 3);
+      if (hit) { used.add(hit.id); matched++; continue; }
+      const description = String(r[map.desc] || 'Statement entry').replace(/\s+/g, ' ').slice(0, 80), key = `${t.id}|${date}|${description}|${a}`; seen[key] = (seen[key] || 0) + 1;
+      let hsh = 5381; for (const ch of key + '|' + seen[key]) hsh = ((hsh << 5) + hsh + ch.charCodeAt(0)) >>> 0;
+      const sid = 'st_' + hsh.toString(36); if (state.expenses.some(e => e.id === sid)) { matched++; continue; }
+      missing.push({ id: sid, date, amount: a, description });
+    }
+    dates.sort(); const lo = dates[0], hi = dates[dates.length - 1];
+    const extra = lo ? mine.filter(e => !used.has(e.id) && e.date >= lo && e.date <= hi) : [];
+    return { matched, missing, credits, extra };
+  };
+  const draw = () => {
+    if (!data) { body.innerHTML = `<p class="hint" style="margin:0 0 12px">Download this ${isCard ? "card's" : "account's"} statement from your bank as CSV (or Excel, then save as CSV) and pick it here. Tandem lists only the payments it cannot find among what you logged.</p>
+      <input class="in" type="file" id="mFile" accept=".csv,.tsv,.txt,text/csv"><textarea class="in" id="mText" rows="5" placeholder="…or paste the rows here" style="margin-top:10px"></textarea>
+      <button class="btn primary block" data-read="1" style="margin-top:10px">Read</button><button class="btn block" data-back="1" style="margin-top:8px">Back</button>`; return; }
+    const r = analyse(), opt = k => `<option value="">— not in file —</option>${data.heads.map((hd, i) => `<option value="${i}" ${String(map[k]) === String(i) ? 'selected' : ''}>${esc(hd || 'Column ' + (i + 1))}</option>`).join('')}`, n = r.missing.filter(m => !off.has(m.id)).length, sp = S.split, who = t.owner === meId() ? 'you' : uname(t.owner);
+    body.innerHTML = `<div class="two">${FIELDS.map(([k, label]) => `<label class="f"><span>${esc(label)}</span><select class="in" data-map="${k}">${opt(k)}</select></label>`).join('')}</div>
+      <div class="alert ${r.missing.length ? '' : 'info'}"><span class="grow"><b>${r.missing.length ? r.missing.length + ' payment' + (r.missing.length > 1 ? 's' : '') + ' not logged' : 'Nothing is missing'}</b><small>${r.matched} already logged${r.credits ? ' · ' + r.credits + ' credits ignored' : ''}</small></span></div>
+      ${r.missing.length ? `<div class="list">${r.missing.map(m => `<button type="button" class="row srow ${off.has(m.id) ? '' : 'on'}" data-tog="${esc(m.id)}"><span class="chk"></span><span class="rmain"><b>${esc(m.description)}</b><small>${niceDate(m.date)} · ${esc(cat(guessCat(m.description.toLowerCase()) || 'other').name)}</small></span><span class="ramt"><b>${money(m.amount)}</b></span></button>`).join('')}</div>
+      <div class="fsec" style="margin-top:12px"><span class="flabel">Add them as</span><div class="seg"><button type="button" class="${split === 'shared' ? 'on' : ''}" data-split="shared">Shared ${sp}/${100 - sp}</button><button type="button" class="${split === 'personal' ? 'on' : ''}" data-split="personal">Just ${esc(who)}</button></div><p class="hint">You can open any of them afterwards to change the category or split.</p></div>` : ''}
+      ${r.extra.length ? `<p class="hint">${r.extra.length} logged entr${r.extra.length === 1 ? 'y is' : 'ies are'} not on this statement (wrong ${isCard ? 'card' : 'account'}, or a later statement?): ${esc(r.extra.slice(0, 4).map(e => e.description + ' ' + money(e.amount)).join(', '))}${r.extra.length > 4 ? '…' : ''}</p>` : ''}
+      <div class="stick">${r.missing.length ? `<button class="btn primary block" data-go="1" ${n ? '' : 'disabled'}>Add ${n} missing payment${n === 1 ? '' : 's'}</button>` : ''}<button class="btn block" data-back="1" style="margin-top:8px">Back to reconcile</button></div>`;
+  };
+  const load = text => {
+    const all = parseCsv(text), hi = all.slice(0, 40).findIndex(r => r.some(c => /date/i.test(c)) && r.some(c => /amount|debit|withdraw|spent/i.test(c)));      // banks put junk lines above the real header
+    if (hi < 0 || all.length < hi + 2) return toast('Could not find a header row with a date and an amount');
+    data = { heads: all[hi], rows: all.slice(hi + 1) }; map = {}; off = new Set(); const used = new Set();
+    FIELDS.forEach(([k, , re]) => { const i = data.heads.findIndex((hd, j) => !used.has(j) && re.test(hd)); map[k] = i >= 0 ? i : ''; if (i >= 0) used.add(i); });
+    draw();
+  };
+  body.onclick = async ev => {
+    const hit = s => ev.target.closest(s);
+    if (hit('[data-back]')) return openReconcile(kind, id);
+    if (hit('[data-read]')) { const fl = $('#mFile', body).files[0]; return load(fl ? await fl.text() : $('#mText', body).value); }
+    const tg = hit('[data-tog]'); if (tg) { off.has(tg.dataset.tog) ? off.delete(tg.dataset.tog) : off.add(tg.dataset.tog); return draw(); }
+    const sp = hit('[data-split]'); if (sp) { split = sp.dataset.split; return draw(); }
+    if (hit('[data-go]')) {
+      const add = analyse().missing.filter(m => !off.has(m.id)); if (!add.length) return;
+      add.forEach(m => mutate('Expenses', { id: m.id, type: 'expense', date: m.date, amount: m.amount, description: m.description, category: guessCat(m.description.toLowerCase()) || 'other', paidBy: t.owner, mode: isCard ? 'credit_card' : 'upi', cardId: isCard ? t.id : '', accountId: isCard ? '' : t.id, splitType: split, ...computeShares(m.amount, t.owner, split, 50), notes: 'From statement', recurringId: '', settledBy: '', createdAt: Date.now(), deleted: false }, true));
+      render(); toast(`${add.length} payment${add.length === 1 ? '' : 's'} added`); return openReconcile(kind, id);
+    }
+  };
+  body.onchange = ev => { if (ev.target.dataset.map) { map[ev.target.dataset.map] = ev.target.value; draw(); } };
+  draw();
+}
+
+/* ---- import from a CSV (your old sheet, a bank statement, or Tandem's own export) */
+function parseCsv(text) {
+  const rows = []; let row = [], cur = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
+    else if (c === '"') q = true;
+    else if (c === ',' || c === '\t') { row.push(cur); cur = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(cur); cur = ''; rows.push(row); row = []; }
+    else cur += c;
+  }
+  row.push(cur); rows.push(row);
+  return rows.map(r => r.map(x => x.trim())).filter(r => r.some(Boolean));
+}
+function parseDate(v) {
+  const s = String(v || '').trim(), MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+  let y, m, d, x;
+  if ((x = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/))) [, y, m, d] = x;
+  else if ((x = s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})/))) [, d, m, y] = x;                    // day first, as in India
+  else if ((x = s.match(/^(\d{1,2})[-\s]([A-Za-z]{3})[A-Za-z]*[-\s,]*(\d{2,4})/))) { d = x[1]; m = MON[x[2].toLowerCase()]; y = x[3]; }
+  else if ((x = s.match(/^([A-Za-z]{3})[A-Za-z]*\s+(\d{1,2}),?\s+(\d{4})/))) { m = MON[x[1].toLowerCase()]; d = x[2]; y = x[3]; }
+  y = Number(y); m = Number(m); d = Number(d); if (y < 100) y += 2000;
+  return y > 1999 && m >= 1 && m <= 12 && d >= 1 && d <= dim(y, m) ? `${y}-${pad(m)}-${pad(d)}` : '';
+}
+function openImport() {
+  const me = meId(), FIELDS = [['date', 'Date', /date|when/i], ['desc', 'Description', /desc|item|detail|narration|particular|expense|merchant|name/i], ['amount', 'Amount', /amount|total|price|cost|debit|spent/i], ['paidBy', 'Paid by', /paid.?by|payer|who/i], ['category', 'Category', /categ/i], ['share1', uname('u1') + "'s share", new RegExp('^' + uname('u1').replace(/\W/g, '.') + '.*share|' + (me === 'u1' ? 'your|my' : 'partner') + '.?share', 'i')], ['share2', uname('u2') + "'s share", new RegExp('^' + uname('u2').replace(/\W/g, '.') + '.*share|' + (me === 'u2' ? 'your|my' : 'partner') + '.?share', 'i')], ['mode', 'Payment mode', /^mode|payment/i], ['settled', 'Already settled', /settled/i]];
+  let data = null, map = {}, payer = me;
+  const body = openSheet('Import expenses', '');
+  const cell = (r, k) => (map[k] === '' || map[k] == null ? '' : r[map[k]] || '');
+  const build = () => {
+    const seen = {}, out = [], ti = data.heads.findIndex(x => /^type$/i.test(x));
+    for (const r of data.rows) {
+      if (ti >= 0 && r[ti] && r[ti].toLowerCase() !== 'expense') continue;      // Tandem's own export also lists settlements and money in
+      const date = parseDate(cell(r, 'date')), amount = round2(num(cell(r, 'amount').replace(/[^\d.,-]/g, ''))); if (!date || !(amount > 0)) continue;
+      const description = (cell(r, 'desc') || 'Imported').slice(0, 80), who = cell(r, 'paidBy').toLowerCase();
+      const paidBy = who && uname('u1').toLowerCase() && who.includes(uname('u1').toLowerCase()) ? 'u1' : who && who.includes(uname('u2').toLowerCase()) ? 'u2' : /partner/.test(who) ? other(me) : /^(me|you|self)$/.test(who) ? me : payer;
+      const cn = cell(r, 'category').toLowerCase(), category = (S.cats.find(c => c.name.toLowerCase() === cn) || {}).id || guessCat(description.toLowerCase()) || 'other';
+      const a1 = cell(r, 'share1'), a2 = cell(r, 'share2'); let sh, splitType = 'shared';
+      if (a1 !== '' || a2 !== '') { const s1 = a1 !== '' ? round2(num(a1.replace(/[^\d.,-]/g, ''))) : round2(amount - num(a2.replace(/[^\d.,-]/g, ''))); sh = { share1: Math.min(amount, Math.max(0, s1)), share2: 0 }; sh.share2 = a1 !== '' && a2 !== '' ? Math.min(round2(amount - sh.share1), Math.max(0, round2(num(a2.replace(/[^\d.,-]/g, ''))))) : round2(amount - sh.share1); splitType = 'custom'; }
+      else sh = computeShares(amount, paidBy, 'shared', 50);
+      const friendsShare = round2(amount - sh.share1 - sh.share2);
+      const ml = cell(r, 'mode').toLowerCase(), mode = (MODES.find(m => m[1].toLowerCase() === ml || m[0] === ml) || [''])[0];
+      const key = `${date}|${description}|${amount}|${paidBy}`; seen[key] = (seen[key] || 0) + 1;
+      let hsh = 5381; for (const ch of key + '|' + seen[key]) hsh = ((hsh << 5) + hsh + ch.charCodeAt(0)) >>> 0;
+      out.push({ id: 'imp_' + hsh.toString(36), type: 'expense', date, amount, description, category, paidBy, mode, cardId: '', accountId: '', splitType, splitInfo: splitType === 'custom' ? { cm: 'amounts' } : {}, ...sh, friendsShare: friendsShare > 0.005 ? friendsShare : 0, friends: [], notes: 'Imported', recurringId: '', settledBy: /^(yes|y|true|1|paid|settled|done|✓|✔|x)$/i.test(cell(r, 'settled')) ? 'imp_settled' : '', createdAt: Date.now(), deleted: false });
+    }
+    return out;
+  };
+  const draw = () => {
+    if (!data) { body.innerHTML = `<p class="hint" style="margin:0 0 12px">Bring in expenses from a spreadsheet or statement. In Google Sheets or Excel choose File → Download → CSV, then pick the file here (or paste the rows). The first row must be the column names.</p>
+      <input class="in" type="file" id="impFile" accept=".csv,.tsv,.txt,text/csv">
+      <textarea class="in" id="impText" rows="5" placeholder="…or paste rows here" style="margin-top:10px"></textarea>
+      <button class="btn primary block" data-read="1" style="margin-top:10px">Read</button>`; return; }
+    const rows = build(), fresh = rows.filter(r => !state.expenses.some(e => e.id === r.id)), opt = k => `<option value="">— not in file —</option>${data.heads.map((hd, i) => `<option value="${i}" ${String(map[k]) === String(i) ? 'selected' : ''}>${esc(hd || 'Column ' + (i + 1))}</option>`).join('')}`;
+    body.innerHTML = `<p class="hint" style="margin:0 0 10px">${data.rows.length} rows read. Check which column is which.</p>
+      <div class="two">${FIELDS.map(([k, label]) => `<label class="f"><span>${esc(label)}</span><select class="in" data-map="${k}">${opt(k)}</select></label>`).join('')}
+      <label class="f"><span>If "paid by" is missing</span><select class="in" id="impPayer">${['u1', 'u2'].map(id => `<option value="${id}" ${payer === id ? 'selected' : ''}>${esc(you(id))}</option>`).join('')}</select></label></div>
+      <div class="card" style="padding:10px 14px"><h3>Preview</h3>${rows.slice(0, 4).map(r => `<div class="rowflex between" style="padding:4px 0;font-size:13.5px"><span class="grow">${niceDate(r.date)} · ${esc(r.description)}<br><small class="muted">${esc(you(r.paidBy))} · ${esc(cat(r.category).name)} · shares ${money0(r.share1)} / ${money0(r.share2)}${r.settledBy ? ' · settled' : ''}</small></span><b>${money(r.amount)}</b></div>`).join('') || '<p class="hint" style="margin:0">No usable rows yet. A row needs a date and an amount.</p>'}</div>
+      <p class="hint">${rows.length} usable, ${data.rows.length - rows.length} skipped (no date or amount)${rows.length - fresh.length ? ', ' + (rows.length - fresh.length) + ' already imported' : ''}. Rows without share columns are split ${S.split}/${100 - S.split}.</p>
+      <div class="stick"><button class="btn primary block" data-go="1" ${fresh.length ? '' : 'disabled'}>Import ${fresh.length} expense${fresh.length === 1 ? '' : 's'}</button><button class="btn block" data-back="1" style="margin-top:8px">Choose another file</button></div>`;
+  };
+  const load = text => {
+    const all = parseCsv(text); if (all.length < 2) return toast('Could not find rows in that');
+    data = { heads: all[0], rows: all.slice(1) }; map = {}; const used = new Set();
+    FIELDS.forEach(([k, , re]) => { const i = data.heads.findIndex((hd, j) => !used.has(j) && re.test(hd)); map[k] = i >= 0 ? i : ''; if (i >= 0) used.add(i); });
+    draw();
+  };
+  body.onclick = async ev => {
+    if (ev.target.closest('[data-read]')) { const fl = $('#impFile', body).files[0]; return load(fl ? await fl.text() : $('#impText', body).value); }
+    if (ev.target.closest('[data-back]')) { data = null; return draw(); }
+    if (ev.target.closest('[data-go]')) {
+      const rows = build().filter(r => !state.expenses.some(e => e.id === r.id)); if (!rows.length) return;
+      if (rows.some(r => r.settledBy) && !state.expenses.some(e => e.id === 'imp_settled')) mutate('Expenses', { id: 'imp_settled', type: 'settlement', date: today(), amount: 0, description: 'Settled before import', category: '', paidBy: me, mode: '', cardId: '', splitType: '', share1: 0, share2: 0, notes: '', recurringId: '', settledBy: '', createdAt: Date.now(), deleted: false }, true);
+      rows.forEach(r => mutate('Expenses', r, true));
+      closeSheet(); render(); toast(`Imported ${rows.length} expense${rows.length === 1 ? '' : 's'}`);
+    }
+  };
+  body.onchange = ev => { if (ev.target.dataset.map) { map[ev.target.dataset.map] = ev.target.value; draw(); } if (ev.target.id === 'impPayer') { payer = ev.target.value; draw(); } };
+  draw();
+}
+
+function openIncome(existing, preset, after) {
+  const me = meId();
+  const f = existing ? { ...existing } : { id: uid(), amount: '', description: '', category: 'salary', paidBy: me, accountId: prefs.lastInAcct || '', date: today(), notes: '', ...preset };
+  const body = openSheet(existing ? 'Edit money in' : 'Add money in', '');
+  const collect = () => { f.amount = $('#iAmt', body).value; f.description = $('#iDesc', body).value; f.date = $('#iDate', body).value || f.date; f.notes = $('#iNotes', body).value; };
+  const draw = () => {
+    const accts = liveAccts().filter(a => a.owner === f.paidBy);
+    if (!accts.some(a => a.id === f.accountId)) f.accountId = !existing && accts.length === 1 ? accts[0].id : '';
+    body.innerHTML = `${existing ? '' : '<div class="seg" style="margin-bottom:12px"><button type="button" data-toexpense="1">Expense</button><button type="button" class="on">Money in</button><button type="button" data-totransfer="1">Transfer</button></div>'}
+      <div class="amount"><span>${esc(S.cur)}</span><input id="iAmt" inputmode="decimal" placeholder="0" value="${esc(f.amount)}" autocomplete="off"></div>
+      <div class="fsec"><span class="flabel">What is it?</span><div class="chips">${IN_KINDS.map(k => chip(f.category === k[0], `data-set="category" data-val="${k[0]}"`, k[2] + ' ' + k[1])).join('')}</div></div>
+      <div class="fsec"><input class="in" id="iDesc" placeholder="From whom / what for (optional)" value="${esc(f.description)}" maxlength="80" autocomplete="off"></div>
+      <div class="fsec"><span class="flabel">Received by</span><div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.paidBy === id ? 'on' : ''}" data-set="paidBy" data-val="${id}">${esc(you(id))}</button>`).join('')}</div></div>
+      <div class="fsec"><span class="flabel">Into account</span>${accts.length ? `<div class="chips">${accts.map(a => chip(f.accountId === a.id, `data-set="accountId" data-val="${esc(a.id)}"`, esc(acctLabel(a)))).join('')}${chip(!f.accountId, 'data-set="accountId" data-val=""', 'Cash / other')}</div>` : `<p class="hint" style="margin:0">No accounts saved for ${esc(youL(f.paidBy))} yet. Add them under More → Bank accounts.</p>`}</div>
+      <div class="fsec"><div class="rowflex"><input class="in" type="date" id="iDate" value="${esc(f.date)}" max="2099-12-31"><input class="in" id="iNotes" placeholder="Notes" value="${esc(f.notes)}" maxlength="300"></div></div>
+      <div class="stick"><button class="btn primary block" data-save="1">${existing ? 'Save changes' : 'Save money in'}</button>${existing ? '<button class="btn danger block" data-del="1" style="margin-top:8px">Delete</button>' : ''}</div>`;
+  };
+  const save = () => {
+    collect(); const a = round2(calc(f.amount));
+    if (!(a > 0)) { toast('Enter an amount'); return $('#iAmt', body).focus(); }
+    mutate('Expenses', { id: f.id, type: 'income', date: f.date, amount: a, description: f.description.trim() || inKind(f.category)[1], category: f.category, paidBy: f.paidBy, mode: '', cardId: '', accountId: f.accountId || '', splitType: '', share1: 0, share2: 0, notes: f.notes.trim(), recurringId: '', settledBy: '', createdBy: existing ? existing.createdBy : me, createdAt: f.createdAt || Date.now(), deleted: false });
+    if (f.paidBy === me) { prefs.lastInAcct = f.accountId; savePrefs(); }
+    toast(existing ? 'Updated' : `Added ${money(a)} money in`); if (after) after(); else closeSheet();
+  };
+  body.onclick = ev => {
+    const s = ev.target.closest('[data-set]');
+    if (s) { collect(); f[s.dataset.set] = s.dataset.val; return draw(); }
+    if (ev.target.closest('[data-toexpense]')) { collect(); return openExpense(null, { amount: f.amount, date: f.date }); }
+    if (ev.target.closest('[data-totransfer]')) { collect(); return openTransfer(null, { amount: f.amount, date: f.date }); }
+    if (ev.target.closest('[data-save]')) return save();
+    if (ev.target.closest('[data-del]') && confirm('Delete this entry?')) { mutate('Expenses', { ...existing, deleted: true }); closeSheet(); toast('Deleted', { label: 'Undo', fn: () => mutate('Expenses', { ...existing, deleted: false }) }); }
+  };
+  body.onkeydown = ev => { if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') { ev.preventDefault(); save(); } };
+  draw();
+  if (!existing) setTimeout(() => { const i = $('#iAmt', body); i && i.focus(); }, 60);
+}
+
+function openQuick(key) {
+  const me = meId(), items = state.recurring.filter(r => !r.deleted && r.schedule === 'ask' && r.paidBy === me);
+  const link = (r, act) => `${cfg.api}?quick=${encodeURIComponent(key)}&rid=${encodeURIComponent(r.id)}&do=${act}`;
+  const topic0 = state.settings['ntfy_' + me] || '';
+  const body = openSheet('Timed prompts', `
+    ${items.length ? '' : '<div class="alert"><span class="grow"><b>No “Ask me” items yet</b><small>Create one under More → Recurring → Ask me on some days, then come back.</small></span></div>'}
+    <div class="card"><h3>Android · notification with buttons</h3>
+      <p class="hint" style="margin:0 0 10px">1. Install the free <b>ntfy</b> app from the Play Store.<br>2. In ntfy tap + and subscribe to the topic below (keep it private, it works like a password).<br>3. Save here. At each item's time you get a notification with <b>Add</b> and <b>Not today</b>.</p>
+      <div class="rowflex"><input class="in" id="qTopic" value="${esc(topic0)}" placeholder="topic name" autocapitalize="off" autocomplete="off" maxlength="60"><button class="btn" data-gen="1">New</button></div>
+      <div class="rowflex" style="margin-top:10px"><button class="btn primary grow" data-savetopic="1">Save & send test</button>${topic0 ? '<button class="btn danger" data-offtopic="1">Turn off</button>' : ''}</div></div>
+    <div class="card"><h3>iPhone · Shortcuts pop-up</h3>
+      <p class="hint" style="margin:0 0 10px">Shortcuts app → Automation → + → Time of Day (pick time and days, Run Immediately) → New Blank Automation → add <b>Choose from Menu</b> with options Add and No → under each, add <b>Get Contents of URL</b> and paste the matching link.</p>
+      ${items.map(r => `<div class="rowflex between" style="padding:6px 0"><span class="grow"><b>${esc(r.description)}</b><br><small class="muted">${esc(dayText(r.days))} · ${esc(r.askTime)}</small></span><button class="btn sm" data-copy="${esc(link(r, 'add'))}">Copy Add link</button><button class="btn sm" data-copy="${esc(link(r, 'skip'))}">Copy No link</button></div>`).join('') || '<p class="hint" style="margin:0">Links appear here once you have an “Ask me” item.</p>'}</div>
+    <p class="hint">These links can only add or skip your own “Ask me” items for today. If one leaks, tap Reset links.</p>
+    <button class="btn block" data-reset="1">Reset links</button>`);
+  body.onclick = async ev => {
+    const hit = s => ev.target.closest(s);
+    if (hit('[data-gen]')) { $('#qTopic', body).value = 'tandem-' + uid() + uid(); return; }
+    const c = hit('[data-copy]'); if (c) { try { await navigator.clipboard.writeText(c.dataset.copy); toast('Link copied'); } catch { prompt('Copy this link', c.dataset.copy); } return; }
+    if (hit('[data-savetopic]')) {
+      const t = $('#qTopic', body).value.trim(); if (!/^[A-Za-z0-9_-]{8,60}$/.test(t)) return toast('Use 8+ letters, numbers, - or _ (tap New for a random one)');
+      setSetting('ntfy_' + me, t); toast('Saving…');
+      try { await api('ntfyTest', { token: session.token, topic: t }); toast('Test sent — check the ntfy app'); } catch (e) { toast(e.message); }
+      return;
+    }
+    if (hit('[data-offtopic]')) { setSetting('ntfy_' + me, ''); closeSheet(); return toast('Android prompts turned off'); }
+    if (hit('[data-reset]') && confirm('Old links stop working. Shortcuts will need the new links. Continue?')) { try { const r = await api('quickKey', { token: session.token, reset: true }); openQuick(r.key); toast('Links reset'); } catch (e) { toast(e.message); } }
+  };
+}
+
+function openAccount(a) {
+  const f = a ? { ...a } : { id: uid(), owner: meId(), name: '', upiApp: '' };
+  const body = openSheet(a ? 'Edit account' : 'Add bank account', '');
+  const collect = () => { f.name = $('#aNm', body).value; f.upiApp = $('#aUpi', body).value; };
+  const past = mode => spends().filter(e => e.paidBy === a.owner && e.mode === mode && !e.accountId);
+  const draw = () => {
+    body.innerHTML = `<label class="f"><span>Account name</span><input class="in" id="aNm" value="${esc(f.name)}" placeholder="e.g. HDFC Salary" maxlength="30"></label>
+      <div class="fsec"><span class="flabel">Whose account</span><div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.owner === id ? 'on' : ''}" data-own="${id}">${esc(you(id))}</button>`).join('')}</div></div>
+      <label class="f"><span>UPI app used with it (optional)</span><input class="in" id="aUpi" value="${esc(f.upiApp)}" placeholder="e.g. GPay" maxlength="20" list="upiApps"><datalist id="upiApps">${UPI_APPS.map(n => `<option value="${n}">`).join('')}</datalist></label>
+      <label class="f"><span>Balance right now (optional)</span><input class="in" id="aBal" inputmode="decimal" placeholder="${a && a.balance0At ? 'Type a new figure to correct it' : 'Type it to start tracking a balance'}"></label>
+      <div class="chips" style="margin:-6px 0 14px">${UPI_APPS.slice(0, 5).map(n => chip(f.upiApp === n, `data-upi="${n}"`, n)).join('')}</div>
+      <p class="hint" style="margin:0 0 14px">Only a name to recognise it by. Never enter account numbers or UPI PINs.</p>
+      <button class="btn primary block" data-save="1">Save account</button>${a ? `${(m => m.length ? `<div class="card" style="margin-top:14px"><h3>Earlier payments with no account</h3><p class="hint" style="margin:0 0 10px">Payments by ${esc(youL(a.owner))} logged before this account existed. Tap to file them under ${esc(a.name)}.</p><div class="chips">${m.map(([id, n]) => `<button type="button" class="chip" data-past="${id}">${esc(modeLabel(id))} · ${n}</button>`).join('')}</div></div>` : '')(ACCT_MODES.map(id => [id, past(id).length]).filter(x => x[1]))}<button class="btn danger block" data-del="1" style="margin-top:8px">Remove account</button>` : ''}`;
+  };
+  body.onclick = ev => {
+    const o = ev.target.closest('[data-own]'); if (o) { collect(); f.owner = o.dataset.own; return draw(); }
+    const pm = ev.target.closest('[data-past]');
+    if (pm) { const list = past(pm.dataset.past); if (!list.length || !confirm(`File ${list.length} earlier ${modeLabel(pm.dataset.past)} payment${list.length > 1 ? 's' : ''} under ${a.name}?`)) return;
+      list.forEach(e => mutate('Expenses', { ...e, accountId: a.id, upiApp: e.mode === 'upi' && !e.upiApp ? a.upiApp : e.upiApp }, true)); render(); toast(`${list.length} payment${list.length > 1 ? 's' : ''} filed under ${a.name}`); collect(); return draw(); }
+    const u = ev.target.closest('[data-upi]'); if (u) { collect(); f.upiApp = f.upiApp === u.dataset.upi ? '' : u.dataset.upi; return draw(); }
+    if (ev.target.closest('[data-save]')) { collect(); if (!f.name.trim()) return toast('Give the account a name'); const nb = $('#aBal', body).value.trim(); mutate('Accounts', { id: f.id, owner: f.owner, name: f.name.trim(), upiApp: f.upiApp.trim(), balance0: nb ? round2(calc(nb)) : f.balance0 || 0, balance0At: nb ? Date.now() : f.balance0At || 0, deleted: false }); closeSheet(); toast('Account saved'); }
+    if (ev.target.closest('[data-del]') && confirm('Remove this account? Past entries stay.')) { mutate('Accounts', { ...a, deleted: true }); closeSheet(); }
+  };
+  draw();
+}
+
+function openRec(r) {
+  const f = r ? { ...r } : { id: uid(), description: '', amount: '', category: 'utilities', paidBy: meId(), mode: 'upi', cardId: '', accountId: '', splitType: 'shared', payerPct: 50, dayOfMonth: 1, active: true, schedule: 'monthly', days: '1,2,3,4,5', askTime: '13:00', startDate: today() };
+  f.schedule = f.schedule || 'monthly'; f.days = f.days || '1,2,3,4,5'; f.askTime = f.askTime || '13:00';
+  const body = openSheet(r ? 'Edit recurring' : 'Add recurring expense', '');
+  const val = id => ($('#' + id, body) || {}).value;
+  const collect = () => { f.description = val('rDesc'); f.amount = val('rAmt'); if (val('rDay')) f.dayOfMonth = Number(val('rDay')); if (val('rTime')) f.askTime = val('rTime'); f.category = val('rCat'); f.mode = val('rMode'); f.cardId = val('rCard') || ''; f.accountId = val('rAcct') || ''; };
+  const draw = () => {
+    const cards = liveCards().filter(c => c.owner === f.paidBy), accts = liveAccts().filter(a => a.owner === f.paidBy), sp = S.split, o = other(f.paidBy), ask = f.schedule === 'ask', days = f.days.split(',');
+    body.innerHTML = `<div class="seg" style="margin-bottom:14px"><button type="button" class="${ask ? '' : 'on'}" data-set="schedule" data-val="monthly">Every month</button><button type="button" class="${ask ? 'on' : ''}" data-set="schedule" data-val="ask">Ask me on some days</button></div>
+      <div class="amount"><span>${esc(S.cur)}</span><input id="rAmt" inputmode="decimal" value="${esc(f.amount)}" placeholder="0"></div>
+      <label class="f"><span>Description</span><input class="in" id="rDesc" value="${esc(f.description)}" placeholder="${ask ? 'e.g. Office lunch' : 'e.g. Rent, Netflix'}" maxlength="80"></label>
       <div class="grid2" style="grid-template-columns:1fr 1fr;margin-bottom:0"><label class="f"><span>Category</span><select class="in" id="rCat">${S.activeCats.map(c => `<option value="${esc(c.id)}" ${f.category === c.id ? 'selected' : ''}>${esc(c.emoji + ' ' + c.name)}</option>`).join('')}</select></label>
-      <label class="f"><span>Day of month</span><select class="in" id="rDay">${Array.from({ length: 31 }, (_, i) => `<option ${i + 1 === f.dayOfMonth ? 'selected' : ''}>${i + 1}</option>`).join('')}</select></label></div>
+      ${ask ? `<label class="f"><span>Ask from</span><input class="in" type="time" id="rTime" value="${esc(f.askTime)}"></label>` : `<label class="f"><span>Day of month</span><select class="in" id="rDay">${Array.from({ length: 31 }, (_, i) => `<option ${i + 1 === f.dayOfMonth ? 'selected' : ''}>${i + 1}</option>`).join('')}</select></label>`}</div>
+      ${ask ? `<div class="fsec"><span class="flabel">Ask on</span><div class="chips">${[1, 2, 3, 4, 5, 6, 0].map(d => chip(days.includes(String(d)), `data-day="${d}"`, DAYN[d])).join('')}</div><p class="hint">On these days, from that time, Home shows “Add this?” with Add and No. Nothing is added until you tap Add, and only the person paying is asked.</p></div>` : ''}
       <div class="fsec"><span class="flabel">Paid by</span><div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.paidBy === id ? 'on' : ''}" data-set="paidBy" data-val="${id}">${esc(you(id))}</button>`).join('')}</div></div>
       <div class="grid2" style="grid-template-columns:1fr 1fr;margin-bottom:0"><label class="f"><span>Payment mode</span><select class="in" id="rMode">${MODES.map(m => `<option value="${m[0]}" ${f.mode === m[0] ? 'selected' : ''}>${m[1]}</option>`).join('')}</select></label>
-      ${f.mode === 'credit_card' && cards.length ? `<label class="f"><span>Card</span><select class="in" id="rCard">${cards.map(c => `<option value="${esc(c.id)}" ${f.cardId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>` : '<span></span>'}</div>
+      ${f.mode === 'credit_card' && cards.length ? `<label class="f"><span>Card</span><select class="in" id="rCard">${cards.map(c => `<option value="${esc(c.id)}" ${f.cardId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>`
+        : ACCT_MODES.includes(f.mode) && accts.length ? `<label class="f"><span>Account</span><select class="in" id="rAcct"><option value="">Not set</option>${accts.map(a => `<option value="${esc(a.id)}" ${f.accountId === a.id ? 'selected' : ''}>${esc(acctLabel(a))}</option>`).join('')}</select></label>` : '<span></span>'}</div>
       <div class="fsec"><span class="flabel">Split</span><div class="chips">${chip(f.splitType === 'shared', 'data-set="splitType" data-val="shared"', `Shared ${sp}/${100 - sp}`)}${chip(f.splitType === 'personal', 'data-set="splitType" data-val="personal"', `Just ${esc(youL(f.paidBy))}`)}${chip(f.splitType === 'other', 'data-set="splitType" data-val="other"', `All ${esc(youL(o))}${o === meId() ? 'rs' : "'s"}`)}</div></div>
       <div class="fsec"><div class="seg"><button type="button" class="${f.active ? 'on' : ''}" data-set="active" data-val="1">Active</button><button type="button" class="${f.active ? '' : 'on'}" data-set="active" data-val="">Paused</button></div></div>
       <button class="btn primary block" data-save="1">Save</button>${r ? '<button class="btn danger block" data-del="1" style="margin-top:8px">Delete</button>' : ''}`;
@@ -1156,11 +1735,14 @@ function openRec(r) {
   body.onclick = ev => {
     const s = ev.target.closest('[data-set]');
     if (s) { collect(); f[s.dataset.set] = s.dataset.set === 'active' ? !!s.dataset.val : s.dataset.val; draw(); return; }
+    const dy = ev.target.closest('[data-day]');
+    if (dy) { collect(); const set = new Set(f.days.split(',').filter(Boolean)); set.has(dy.dataset.day) ? set.delete(dy.dataset.day) : set.add(dy.dataset.day); f.days = [...set].join(','); return draw(); }
     if (ev.target.closest('[data-save]')) {
-      collect(); const a = round2(num(f.amount));
+      collect(); const a = round2(num(f.amount)), ask = f.schedule === 'ask';
       if (!(a > 0) || !f.description.trim()) return toast('Add an amount and description');
-      mutate('Recurring', { id: f.id, description: f.description.trim(), amount: a, category: f.category, paidBy: f.paidBy, mode: f.mode, cardId: f.mode === 'credit_card' ? f.cardId : '', splitType: f.splitType, payerPct: f.payerPct, dayOfMonth: f.dayOfMonth, active: f.active, deleted: false }, true);
-      closeSheet(); runRecurring(); render(); toast('Saved');
+      if (ask && !f.days) return toast('Pick at least one day');
+      mutate('Recurring', { id: f.id, description: f.description.trim(), amount: a, category: f.category, paidBy: f.paidBy, mode: f.mode, cardId: f.mode === 'credit_card' ? f.cardId : '', accountId: ACCT_MODES.includes(f.mode) ? f.accountId : '', splitType: f.splitType, payerPct: f.payerPct, dayOfMonth: f.dayOfMonth, active: f.active, schedule: f.schedule, days: ask ? f.days : '', askTime: ask ? f.askTime : '', startDate: ask ? ((r && r.schedule === 'ask' && r.startDate) || today()) : '', deleted: false }, true);
+      closeSheet(); runRecurring(); render(); tick(); toast('Saved');
     }
     if (ev.target.closest('[data-del]') && confirm('Delete this recurring expense? Entries already added stay.')) { mutate('Recurring', { ...r, deleted: true }); closeSheet(); }
   };
@@ -1172,13 +1754,17 @@ function openRec(r) {
 const A = {
   nav: el => go(el.dataset.v),
   add: () => openExpense(),
-  edit: el => { const e = state.expenses.find(x => x.id === el.dataset.id); e && openExpense(e); },
+  edit: el => { const e = state.expenses.find(x => x.id === el.dataset.id); if (!e) return; if (e.refundOf || e.amount < 0) return openRefund(null, e); openExpense(e); },
+  editTransfer: el => { const e = state.expenses.find(x => x.id === el.dataset.id); e && openTransfer(e); },
+  addTransfer: () => openTransfer(),
+  importCsv: () => openImport(),
+  async backupNow() { toast('Making a copy…'); try { const r = await api('backup', { token: session.token }); meta.lastBackup = { url: r.url, at: Date.now() }; store.set(K.meta, meta); render(); toast('Backup copy saved to your Google Drive'); } catch (e) { toast(/Unknown action/.test(e.message) ? 'Update the backend script first' : e.message); } },
   editSettle: el => { const e = state.expenses.find(x => x.id === el.dataset.id); e && openSettlement(e); },
   settle: () => openSettle(),
   friend: el => openFriend(el.dataset.id),
   addFriend: () => { const name = (prompt('Friend\'s name') || '').trim().slice(0, 30); if (name) { setSetting('friends', [...friendsAll(), { id: 'f' + uid(), name }]); render(); } },
   shareList() {
-    const list = expFiltered().filter(e => e.type !== 'settlement'), q = ui.filter.q.trim(); if (!list.length) return toast('Nothing to share');
+    const list = expFiltered().filter(e => e.type === 'expense'), q = ui.filter.q.trim(); if (!list.length) return toast('Nothing to share');
     const lines = list.slice(0, 100).map(e => `${niceDate(e.date)} · ${e.description}: ${money(e.amount)} (${uname(e.paidBy)}${e.friendsShare ? ', friends ' + money(e.friendsShare) : ''})`);
     share([`Tandem · ${q ? 'Search “' + q + '”' : monthName(ui.month)}`, '', ...lines, list.length > 100 ? `…and ${list.length - 100} more` : '', '', `Total: ${money(list.reduce((s, e) => s + e.amount, 0))} · ${uname('u1')}'s share ${money(list.reduce((s, e) => s + e.share1, 0))} · ${uname('u2')}'s share ${money(list.reduce((s, e) => s + e.share2, 0))}`].filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n'), 'List copied');
   },
@@ -1194,11 +1780,18 @@ const A = {
   },
   closeSheet,
   sheetBg: (el, ev) => { if (ev.target === el) closeSheet(); },
-  syncNow: () => { if (cfg.demo) return toast('Demo mode — data stays on this device'); if (!navigator.onLine) return toast('You are offline — changes are saved and will sync'); sync().then(() => toast(syncErr ? syncErr.message : 'Synced')); },
+  syncNow: () => { if (cfg.demo) return toast('Demo mode — data stays on this device'); if (!navigator.onLine) return toast('You are offline — changes are saved and will sync'); sync(true).then(() => toast(syncErr ? syncErr.message : 'Synced')); },
   month: el => { ui.month = addMonth(ui.month, Number(el.dataset.n)); render(); },
   basis: el => { ui.basis = el.dataset.b; render(); },
+  editAcct: el => openAccount(liveAccts().find(a => a.id === el.dataset.id)),
+  addIncome: () => openIncome(),
+  editIncome: el => { const e = state.expenses.find(x => x.id === el.dataset.id); e && openIncome(e); },
+  askAdd: el => doAsk(el.dataset.id, 'add'),
+  askSkip: el => doAsk(el.dataset.id, 'skip'),
+  askEdit: el => doAsk(el.dataset.id, 'edit'),
   editCard: el => openCard(state.cards.find(c => c.id === el.dataset.id)),
   editRec: el => openRec(state.recurring.find(r => r.id === el.dataset.id)),
+  reconcile: el => openReconcile(el.dataset.kind, el.dataset.id),
   markPaid: el => { const c = state.cards.find(x => x.id === el.dataset.id); if (!c) return; const i = cardInfo(c); mutate('BillPayments', { id: c.id + '_' + i.stmt, cardId: c.id, cycle: i.stmt, paidOn: today(), paidBy: meId(), deleted: false }); toast('Marked as paid'); },
   unmarkPaid: el => { const c = state.cards.find(x => x.id === el.dataset.id); if (!c) return; const i = cardInfo(c); mutate('BillPayments', { id: c.id + '_' + i.stmt, cardId: c.id, cycle: i.stmt, deleted: true }); },
   addPlat: () => { const n = (prompt('Platform name') || '').trim().slice(0, 24); if (n && !S.platforms.includes(n)) { setSetting('platforms', [...S.platforms, n]); render(); } },
@@ -1216,6 +1809,8 @@ const A = {
     if (n.length < 6) return toast('New password needs 6+ characters');
     try { const r = await api('updateProfile', { token: session.token, oldPassword: o, newPassword: n }); session.token = r.token; store.set(K.session, session); $('#pwOld').value = $('#pwNew').value = ''; toast('Password changed'); } catch (e) { toast(e.message); }
   },
+  async quickSetup() { toast('Loading…'); try { const r = await api('quickKey', { token: session.token }); setSetting('quickApi', cfg.api); setSetting('appUrl', location.origin + location.pathname); openQuick(r.key); } catch (e) { toast(/Unknown action/.test(e.message) ? 'Update the backend script first (see SETUP.md)' : e.message); } },
+  async unlinkGoogle() { try { await api('linkGoogle', { token: session.token, unlink: true }); const u = state.users.find(x => x.id === meId()); if (u) u.googleEmail = ''; saveState(); render(); toast('Unlinked'); } catch (e) { toast(e.message); } },
   async testEmail() { toast('Sending…'); try { await api('testEmail', { token: session.token }); toast('Test email sent'); } catch (e) { toast(e.message); } },
   async askNotify() { if (!('Notification' in window)) return; const p = await Notification.requestPermission(); render(); if (p === 'granted') { toast('Notifications on'); notifyCards(); } },
   async shareLink() {
@@ -1226,16 +1821,16 @@ const A = {
   switchUser() { session.userId = otherId(); store.set(K.session, session); render(); toast('Now using ' + uname(meId())); },
   logout() {
     if (queue.length && !confirm(`${queue.length} change(s) have not synced yet and will be lost. Sign out anyway?`)) return;
-    session = null; store.del(K.session); queue = []; saveQueue(); state = blank(); saveState();
+    session = null; store.del(K.session); queue = []; saveQueue(); state = blank(); flushState(); meta = {}; store.set(K.meta, meta);
     if (cfg.demo) { cfg = {}; store.set(K.cfg, cfg); }
     location.hash = ''; boot();
   },
-  resetDevice() { if (!confirm('Remove all Tandem data from this device? Your Google Sheet is not touched.')) return; Object.values(K).forEach(store.del); location.hash = ''; location.reload(); },
+  resetDevice() { if (!confirm('Remove all Tandem data from this device? Your Google Sheet is not touched.')) return; clearTimeout(saveT); Object.values(K).forEach(store.del); idb.del('state').catch(() => {}).then(() => { location.hash = ''; location.reload(); }); },
   install() { if (installEvt) { installEvt.prompt(); installEvt = null; } },
   exportCsv() {
-    const head = ['date', 'description', 'category', 'amount', 'paid_by', 'mode', 'card', uname('u1') + '_share', uname('u2') + '_share', 'friends_share', 'friends', 'platform', 'ordered_from', 'category_split', 'added_by', 'type', 'settled', 'notes'];
+    const head = ['date', 'description', 'category', 'amount', 'paid_by', 'mode', 'card', 'account', 'upi_app', uname('u1') + '_share', uname('u2') + '_share', 'friends_share', 'friends', 'platform', 'ordered_from', 'category_split', 'added_by', 'type', 'settled', 'notes'];
     const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const rows = live().sort((a, b) => a.date.localeCompare(b.date)).map(e => [e.date, e.description, cat(e.category).name, e.amount, uname(e.paidBy), modeLabel(e.mode), (state.cards.find(c => c.id === e.cardId) || {}).name || '', e.share1, e.share2, e.friendsShare || 0, (e.friends || []).map(p => friendName(p.id) + ' ' + p.amount + (p.settled ? ' (paid)' : '')).join('; '), e.platform || '', e.platform ? DEVICES[e.device] || DEVICES.primary : '', (e.cats || []).map(c => cat(c.id).name + ' ' + c.amount).join('; '), e.createdBy ? uname(e.createdBy) : '', e.type, e.settledBy ? 'yes' : '', e.notes].map(q).join(','));
+    const rows = live().sort((a, b) => a.date.localeCompare(b.date)).map(e => [e.date, e.description, cat(e.category).name, e.amount, uname(e.paidBy), modeLabel(e.mode), (state.cards.find(c => c.id === e.cardId) || {}).name || '', ((state.accounts || []).find(c => c.id === e.accountId) || {}).name || '', e.upiApp || '', e.share1, e.share2, e.friendsShare || 0, (e.friends || []).map(p => friendName(p.id) + ' ' + p.amount + (p.settled ? ' (paid)' : '')).join('; '), e.platform || '', e.platform ? DEVICES[e.device] || DEVICES.primary : '', (e.cats || []).map(c => cat(c.id).name + ' ' + c.amount).join('; '), e.createdBy ? uname(e.createdBy) : '', e.type, e.settledBy ? 'yes' : '', e.notes].map(q).join(','));
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['﻿' + head.map(q).join(',') + '\n' + rows.join('\n')], { type: 'text/csv' }));
     a.download = `tandem-expenses-${today()}.csv`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
@@ -1258,6 +1853,7 @@ document.addEventListener('change', ev => {
   if (t.dataset.k && t.closest('[data-cat]')) { const id = t.closest('[data-cat]').dataset.cat; setSetting('categories', S.cats.map(c => c.id === id ? { ...c, [t.dataset.k]: t.value.trim() || c[t.dataset.k] } : c)); toast('Saved'); }
   if (t.id === 'splitR') { setSetting('defaultSplit', Number(t.value)); toast('Default split saved'); }
   if (t.id === 'remind') { setSetting('reminderDays', Math.min(15, Math.max(1, Math.round(num(t.value)) || 3))); toast('Saved'); }
+  if (t.id === 'gCid') { const v = t.value.trim(); if (v && !/^[\w.-]+\.apps\.googleusercontent\.com$/.test(v)) return toast('That does not look like a client ID (it ends in .apps.googleusercontent.com)'); setSetting('googleClientId', v); toast(v ? 'Client ID saved' : 'Google sign-in turned off'); render(); }
   if (t.id === 'cur') { setSetting('currency', t.value.trim() || '₹'); toast('Saved'); }
 });
 document.addEventListener('keydown', ev => {
@@ -1290,31 +1886,69 @@ async function showLogin() {
   if (!authInfo.users.length) authSel = 'new';
   drawLogin();
 }
+function loadGsi() {
+  if (window.google && google.accounts && google.accounts.id) return Promise.resolve();
+  return new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://accounts.google.com/gsi/client'; s.async = true; s.onload = () => res(); s.onerror = () => rej(new Error('Could not load Google sign-in')); document.head.appendChild(s); });
+}
+function googleButton(el, clientId, callback) {
+  if (!el || !clientId) return;
+  loadGsi().then(() => { if (!el.isConnected) return; google.accounts.id.initialize({ client_id: clientId, callback, ux_mode: 'popup' }); google.accounts.id.renderButton(el, { theme: 'outline', size: 'large', shape: 'pill', text: 'continue_with', width: 280 }); })
+    .catch(() => { if (el.isConnected) el.innerHTML = '<span class="hint">Google sign-in could not load. Check your connection.</span>'; });
+}
+function finishLogin(r) {
+  session = { token: r.token, userId: r.userId }; store.set(K.session, session);
+  prefs.lastUser = r.userId; savePrefs();
+  state = blank(); queue = []; saveQueue(); meta = {}; store.set(K.meta, meta);
+  startApp();
+}
+async function onGoogleLogin(resp) {
+  try { finishLogin(await api('googleLogin', { credential: resp.credential })); }
+  catch (e) {
+    if (e.code !== 'canregister' || !confirm(e.message + '\n\nCreate a new Tandem account with it?')) return drawLogin(e.message);
+    try { finishLogin(await api('googleLogin', { credential: resp.credential, register: true })); } catch (e2) { drawLogin(e2.message); }
+  }
+}
+function mountGoogleLink() {
+  googleButton($('#gLink'), state.settings.googleClientId, async resp => {
+    try { const r = await api('linkGoogle', { token: session.token, credential: resp.credential }); const u = state.users.find(x => x.id === meId()); if (u) u.googleEmail = r.googleEmail; saveState(); render(); toast('Google account linked'); }
+    catch (e) { toast(e.message); }
+  });
+}
 function drawLogin(err) {
   const us = authInfo.users, isNew = authSel === 'new';
   authShell(`${LOGO}<h2 class="center" style="font-size:22px">${us.length ? "Who's this?" : 'Create the first account'}</h2>
     <div class="profiles">${us.map(u => `<button class="profile ${authSel === u.id ? 'on' : ''}" data-act="pick" data-id="${esc(u.id)}"><span class="avatar" style="background:${esc(u.color || USER_COLORS[u.id])}">${esc((u.name[0] || '?').toUpperCase())}</span>${esc(u.name)}</button>`).join('')}
       ${authInfo.canRegister && us.length ? `<button class="profile ${isNew ? 'on' : ''}" data-act="pick" data-id="new"><span class="avatar" style="background:var(--surface2);color:var(--ink)">+</span>New account</button>` : ''}</div>
+    ${authInfo.googleClientId ? '<div id="gBtn" style="display:flex;justify-content:center;min-height:44px;margin-bottom:6px"></div><p class="center muted" style="margin-bottom:10px">or use your password</p>' : ''}
     <form class="card" id="authForm">
       ${isNew ? '<label class="f"><span>Your name</span><input class="in" id="aName" maxlength="40" autocomplete="name"></label><label class="f"><span>Email (optional, for card reminders)</span><input class="in" id="aEmail" type="email" autocomplete="email"></label>' : ''}
       <label class="f"><span>${isNew ? 'Choose a password (6+ characters)' : 'Password'}</span><input class="in" id="aPw" type="password" autocomplete="${isNew ? 'new-password' : 'current-password'}"></label>
       ${err ? `<p class="neg" style="margin-bottom:10px">${esc(err)}</p>` : ''}
-      <button class="btn primary block" id="authBtn">${isNew ? 'Create account' : 'Sign in'}</button></form>
+      <button class="btn primary block" id="authBtn">${isNew ? 'Create account' : 'Sign in'}</button>${isNew ? '' : '<button type="button" class="btn block" data-act="forgot" style="margin-top:8px">Forgot password?</button>'}</form>
     <button class="btn block" data-act="changeApi">Use a different sheet</button>`);
   $('#authForm').onsubmit = async ev => {
     ev.preventDefault();
     const btn = $('#authBtn'); btn.disabled = true; btn.textContent = 'Please wait…';
     try {
       const r = isNew ? await api('register', { name: $('#aName').value, email: $('#aEmail').value, password: $('#aPw').value }) : await api('login', { userId: authSel, password: $('#aPw').value });
-      session = { token: r.token, userId: r.userId }; store.set(K.session, session);
-      prefs.lastUser = r.userId; savePrefs();
-      state = blank(); queue = []; saveQueue();
-      startApp();
+      finishLogin(r);
     } catch (e) { drawLogin(e.message); }
   };
+  googleButton($('#gBtn'), authInfo.googleClientId, onGoogleLogin);
   const first = $(isNew ? '#aName' : '#aPw'); first && first.focus();
 }
+function drawReset(sentTo, err) {
+  authShell(`${LOGO}<h2 class="center" style="font-size:22px">Reset password</h2><p class="center muted" style="margin:6px 0 16px">A 6-digit code was emailed to ${esc(sentTo)}. It works for 15 minutes.</p>
+    <form class="card" id="rstForm"><label class="f"><span>Code from the email</span><input class="in" id="rCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></label>
+      <label class="f"><span>New password (6+ characters)</span><input class="in" id="rPw" type="password" autocomplete="new-password"></label>
+      ${err ? `<p class="neg" style="margin-bottom:10px">${esc(err)}</p>` : ''}<button class="btn primary block">Set new password</button></form>
+    <button class="btn block" data-act="backLogin">Back to sign in</button>`);
+  $('#rstForm').onsubmit = async ev => { ev.preventDefault(); try { finishLogin(await api('resetConfirm', { userId: authSel, code: $('#rCode').value.trim(), newPassword: $('#rPw').value })); } catch (e) { drawReset(sentTo, e.message); } };
+  $('#rCode').focus();
+}
 const AUTH = {
+  async forgot() { try { const r = await api('resetRequest', { userId: authSel }); drawReset(r.sentTo); } catch (e) { drawLogin(/Unknown action/.test(e.message) ? 'Update the backend script to use password reset.' : e.message); } },
+  backLogin() { drawLogin(); },
   connect() {
     const url = $('#apiUrl').value.trim();
     if (!/^https:\/\/script\.google(usercontent)?\.com\/.+/.test(url)) return showSetup('That does not look like an Apps Script web app URL. It should start with https://script.google.com/ and end in /exec.');
@@ -1340,7 +1974,9 @@ function seedDemo() {
   }
   const old = state.expenses.filter(e => monthOf(e.date) < monthOf(today()));
   if (old.length) { old.forEach(e => (e.settledBy = 'ds1')); state.expenses.push({ id: 'ds1', type: 'settlement', date: dayOn(...today().split('-').map(Number).slice(0, 2), 1), amount: 1840, description: 'Settlement', category: '', paidBy: 'u2', mode: 'upi', cardId: '', splitType: '', share1: 0, share2: 0, notes: '', recurringId: '', settledBy: '', createdAt: Date.now(), deleted: false }); }
-  state.recurring = [{ id: 'r1', description: 'Rent', amount: 24000, category: 'rent', paidBy: 'u1', mode: 'netbanking', cardId: '', splitType: 'shared', payerPct: 50, dayOfMonth: 1, active: true, deleted: false }];
+  state.accounts = [{ id: 'a1', owner: 'u1', name: 'HDFC Salary', upiApp: 'GPay', deleted: false }, { id: 'a2', owner: 'u1', name: 'ICICI Savings', upiApp: 'PhonePe', deleted: false }, { id: 'a3', owner: 'u2', name: 'SBI', upiApp: 'Paytm', deleted: false }];
+  state.expenses.push({ id: 'di1', type: 'income', date: dayOn(...today().split('-').map(Number).slice(0, 2), 1), amount: 85000, description: 'Salary', category: 'salary', paidBy: 'u1', mode: '', cardId: '', accountId: 'a1', splitType: '', share1: 0, share2: 0, notes: '', recurringId: '', settledBy: '', createdBy: 'u1', createdAt: Date.now(), deleted: false });
+  state.recurring = [{ id: 'r2', description: 'Office lunch', amount: 150, category: 'dining', paidBy: 'u1', mode: 'upi', cardId: '', accountId: 'a1', splitType: 'personal', payerPct: 50, dayOfMonth: 1, active: true, deleted: false, schedule: 'ask', days: '0,1,2,3,4,5,6', askTime: '00:00', startDate: today() }, { id: 'r1', description: 'Rent', amount: 24000, category: 'rent', paidBy: 'u1', mode: 'netbanking', cardId: '', splitType: 'shared', payerPct: 50, dayOfMonth: 1, active: true, deleted: false }];
   saveState();
 }
 
@@ -1349,6 +1985,7 @@ function route() {
   const v = location.hash.replace(/^#\/?/, '');
   ui.view = VIEWS[v] ? v : 'home';
   if (session) { closeSheet(); render(); window.scrollTo(0, 0); }
+  if (v.startsWith('ask/')) { const [, id, act] = v.split('/'); history.replaceState(null, '', location.pathname + '#/home'); if (session && act && act !== 'open') doAsk(id, act); }
   if (v === 'add') { history.replaceState(null, '', location.pathname + '#/home'); if (session) openExpense(); }
 }
 function startApp() {
@@ -1369,10 +2006,13 @@ function boot() {
 window.addEventListener('hashchange', route);
 window.addEventListener('online', () => { setStatus(); sync(); });
 window.addEventListener('offline', setStatus);
-document.addEventListener('visibilitychange', () => { if (!document.hidden && session && Date.now() - lastSync > 30000) sync(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { if (saveT) flushState(); return; } if (!session) return; tick(); if (Date.now() - lastSync > 30000) sync(); });
+setInterval(tick, 60000);
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', ev => { const d = ev.data || {}; if (d.ask && session) { go('home'); if (d.action && d.action !== 'open') doAsk(d.ask, d.action); } });
 window.addEventListener('beforeinstallprompt', ev => { ev.preventDefault(); installEvt = ev; if (session && ui.view === 'more') render(); });
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) navigator.serviceWorker.register('sw.js').catch(() => {});
-boot();
+window.addEventListener('pagehide', () => { if (saveT) flushState(); });
+loadState().then(boot);
 })();
 </script>
 </body>
