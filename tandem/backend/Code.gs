@@ -13,16 +13,17 @@ var APP = 'Tandem';
 var SCHEMA = {
   Users: ['id', 'name', 'email', 'color', 'salt', 'passHash', 'createdAt', 'quickKey', 'googleEmail'],
   Expenses: ['id', 'type', 'date', 'amount', 'description', 'category', 'paidBy', 'mode', 'cardId',
-    'splitType', 'splitInfo', 'share1', 'share2', 'friendsShare', 'friends', 'platform', 'device', 'cats', 'accountId', 'upiApp', 'toAccountId', 'refundOf', 'notes', 'recurringId', 'settledBy', 'createdBy', 'createdAt', 'updatedAt', 'deleted'],
-  Cards: ['id', 'owner', 'name', 'last4', 'statementDay', 'dueDay', 'limit', 'deleted', 'updatedAt'],
+    'splitType', 'splitInfo', 'share1', 'share2', 'friendsShare', 'friends', 'platform', 'device', 'cats', 'accountId', 'upiApp', 'debitCardId', 'toAccountId', 'refundOf', 'trip', 'receipt', 'notes', 'recurringId', 'settledBy', 'createdBy', 'createdAt', 'updatedAt', 'deleted'],
+  Cards: ['id', 'owner', 'name', 'last4', 'statementDay', 'dueDay', 'limit', 'rewards', 'deleted', 'updatedAt'],
   Recurring: ['id', 'description', 'amount', 'category', 'paidBy', 'mode', 'cardId', 'splitType',
     'payerPct', 'dayOfMonth', 'active', 'accountId', 'schedule', 'days', 'askTime', 'startDate', 'deleted', 'updatedAt'],
-  Accounts: ['id', 'owner', 'name', 'upiApp', 'balance0', 'balance0At', 'deleted', 'updatedAt'],
+  Accounts: ['id', 'owner', 'name', 'last4', 'upiApp', 'debitCards', 'balance0', 'balance0At', 'deleted', 'updatedAt'],
   BillPayments: ['id', 'cardId', 'cycle', 'paidOn', 'paidBy', 'deleted', 'updatedAt'],
+  Inbox: ['id', 'owner', 'at', 'sender', 'text', 'status', 'expenseId', 'updatedAt'],
   Settings: ['id', 'value', 'updatedAt']
 };
-var WRITABLE = { Expenses: 1, Cards: 1, Accounts: 1, Recurring: 1, BillPayments: 1, Settings: 1 };
-var NUMERIC = { amount: '0.00', share1: '0.00', share2: '0.00', friendsShare: '0.00', createdAt: '0', updatedAt: '0' };
+var WRITABLE = { Expenses: 1, Cards: 1, Accounts: 1, Recurring: 1, BillPayments: 1, Settings: 1, Inbox: 1 };
+var NUMERIC = { amount: '0.00', share1: '0.00', share2: '0.00', friendsShare: '0.00', createdAt: '0', updatedAt: '0', at: '0' };
 var USER_COLORS = ['#2563eb', '#c026d3'];
 
 /* ------------------------------------------------------------------ setup */
@@ -66,6 +67,7 @@ function setup() {
 
 function doGet(e) {
   var q = (e && e.parameter) || {};
+  if (q.sms) return ContentService.createTextOutput(locked_(function () { return sms_({ key: q.sms, text: q.text, from: q.from }); }));
   if (q.quick) {                       // one-tap links used by phone notifications and iPhone Shortcuts
     var msg, lock = LockService.getScriptLock();
     lock.waitLock(25000);
@@ -76,6 +78,12 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  var q = (e && e.parameter) || {};
+  if (q.sms) {                         // a forwarded bank SMS: ?sms=KEY with the text as a form field or as the raw body
+    return ContentService.createTextOutput(locked_(function () {
+      return sms_({ key: q.sms, text: q.text || (e.postData && !/^text=/.test(e.postData.contents || '') ? e.postData.contents : ''), from: q.from });
+    }));
+  }
   var out;
   try {
     var req = JSON.parse(e.postData.contents);
@@ -86,6 +94,11 @@ function doPost(e) {
     out = { ok: false, error: String(err && err.message || err), code: (err && err.code) || 'error' };
   }
   return json_(out);
+}
+
+function locked_(fn) {
+  var lock = LockService.getScriptLock();
+  try { lock.waitLock(25000); return fn(); } catch (err) { return 'Tandem: ' + String(err && err.message || err); } finally { try { lock.releaseLock(); } catch (e) {} }
 }
 
 function json_(o) {
@@ -115,6 +128,9 @@ function route_(req) {
     case 'linkGoogle': return linkGoogle_(me, req);
     case 'backup': return { ok: true, url: backup_() };
     case 'ntfyTest': return ntfyTest_(me, req);
+    case 'receiptUp': return receiptUp_(me, req);
+    case 'receiptGet': return receiptGet_(me, req);
+    case 'receiptDel': return receiptDel_(me, req);
   }
   throw fail_('Unknown action');
 }
@@ -328,6 +344,7 @@ function dump_(since) {
     recurring: rows('Recurring'),
     billPayments: rows('BillPayments'),
     accounts: rows('Accounts'),
+    inbox: rows('Inbox'),
     settings: rows('Settings'),
     sheetUrl: SpreadsheetApp.getActiveSpreadsheet().getUrl()
   };
@@ -353,8 +370,16 @@ var CACHE_ = {};
 function table_(name) {
   if (CACHE_[name]) return CACHE_[name];
   var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  if (!sh && name === 'Inbox') { sh = SpreadsheetApp.getActiveSpreadsheet().insertSheet(name); sh.getRange(1, 1, 1, SCHEMA.Inbox.length).setValues([SCHEMA.Inbox]).setFontWeight('bold'); sh.getRange(2, 1, Math.max(sh.getMaxRows() - 1, 1), SCHEMA.Inbox.length).setNumberFormat('@'); sh.setFrozenRows(1); }
   if (!sh) throw fail_('Sheet "' + name + '" is missing. Run setup again.', 'setup');
   var heads = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+  var missing = (SCHEMA[name] || []).filter(function (h) { return heads.indexOf(h) < 0; });
+  if (missing.length && WRITABLE[name]) {          // new version added columns: append them so nothing is dropped before setup is re-run
+    if (sh.getMaxColumns() < heads.length + missing.length) sh.insertColumnsAfter(sh.getMaxColumns(), heads.length + missing.length - sh.getMaxColumns());
+    sh.getRange(1, heads.length + 1, 1, missing.length).setValues([missing]).setFontWeight('bold');
+    sh.getRange(2, heads.length + 1, Math.max(sh.getMaxRows() - 1, 1), missing.length).setNumberFormat('@');
+    heads = heads.concat(missing);
+  }
   var last = sh.getLastRow();
   var idCol = heads.indexOf('id');
   var rows = {};
@@ -570,7 +595,7 @@ function quick_(q) {
   var acct = read_('Accounts').filter(function (a) { return String(a.id) === String(r.accountId); })[0];
   var sh = shares_(amount, String(r.paidBy), String(r.splitType), r.payerPct);
   upsert_('Expenses', { id: id, type: 'expense', date: date, amount: amount, description: r.description, category: r.category, paidBy: r.paidBy,
-    mode: mode, cardId: r.cardId, accountId: r.accountId, upiApp: mode === 'upi' && acct ? acct.upiApp : '', splitType: r.splitType,
+    mode: mode, cardId: r.cardId, accountId: r.accountId, upiApp: mode === 'upi' && acct ? String(acct.upiApp || '').split(',')[0].trim() : '', debitCardId: mode === 'debit_card' && acct ? (function () { try { return (JSON.parse(acct.debitCards || '[]')[0] || {}).id || ''; } catch (e) { return ''; } })() : '', splitType: r.splitType,
     share1: sh.share1, share2: sh.share2, notes: '', recurringId: r.id, createdBy: u.id, createdAt: Date.now(), updatedAt: Date.now(), deleted: false });
   if (skips.indexOf(id) >= 0) upsert_('Settings', { id: skipKey, value: JSON.stringify(skips.filter(function (x) { return x !== id; })), updatedAt: Date.now() });
   return 'Added ' + r.description + ' ' + money_(amount);
@@ -630,5 +655,56 @@ function testEmail_(me) {
   MailApp.sendEmail(me.email, '✅ Tandem reminders are working',
     'Hi ' + me.name + ',\n\nThis is a test. You will get an email when a card bill is generated and again before it is due.\n\n' +
     (lines.length ? 'Your cards right now:\n' + lines.join('\n') : 'You have no cards yet.') + '\n\n— Tandem');
+  return { ok: true };
+}
+
+/* ------------------------------------------------------------------ bank SMS forwarding */
+
+/** Saves a forwarded bank SMS for review in the app. Only payment messages are kept; OTPs and offers are dropped. */
+function sms_(q) {
+  var u = read_('Users').filter(function (x) { return x.quickKey && String(x.quickKey) === String(q.key); })[0];
+  if (!u) return 'Tandem: this forwarding link is no longer valid. Copy a new one from the app.';
+  var text = String(q.text || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
+  if (!text) return 'Tandem: no message text received.';
+  if (/\botp\b|one.?time.?pass|verification code|do not share/i.test(text)) return 'Tandem: ignored (OTP).';
+  if (!/(?:rs\.?|inr|₹)\s*[0-9]/i.test(text)) return 'Tandem: ignored (no amount).';
+  if (!/debit|spent|paid|sent|withdrawn|purchase|txn|transaction|credit|received|deposit|refund|transfer/i.test(text) ||
+      /pre-?approved|eligible|apply now|offer|win |congrat|(?:min(?:imum)?|total)\s+(?:amount\s+)?due|statement (?:is )?generated|will be debited|is due/i.test(text)) return 'Tandem: ignored (not a payment).';
+  var id = 'sms_' + u.id + '_' + hashText_(text);
+  if (table_('Inbox').rows[id]) return 'Tandem: already received.';
+  upsert_('Inbox', { id: id, owner: u.id, at: Date.now(), sender: String(q.from || '').slice(0, 40), text: text, status: 'new', expenseId: '', updatedAt: Date.now() });
+  return 'Tandem: saved for review.';
+}
+
+function hashText_(t) { var h = 5381, h2 = 52711; for (var i = 0; i < t.length; i++) { var c = t.charCodeAt(i); h = (h * 33) ^ c; h2 = (h2 * 33) ^ c; } return (h >>> 0).toString(36) + (h2 >>> 0).toString(36); }
+
+/* ------------------------------------------------------------------ receipt photos (kept in a Drive folder) */
+
+function receiptFolder_() {
+  var p = PropertiesService.getScriptProperties(), id = p.getProperty('RECEIPTS');
+  if (id) { try { return DriveApp.getFolderById(id); } catch (e) {} }
+  var f = DriveApp.createFolder(APP + ' receipts');
+  p.setProperty('RECEIPTS', f.getId());
+  return f;
+}
+function receiptFile_(id) {
+  var f = DriveApp.getFileById(String(id || '')), folder = receiptFolder_().getId(), it = f.getParents(), ok = false;
+  while (it.hasNext()) if (it.next().getId() === folder) ok = true;
+  if (!ok) throw fail_('Not a Tandem receipt');
+  return f;
+}
+function receiptUp_(me, req) {
+  var data = String(req.data || '');
+  if (!data || data.length > 2500000) throw fail_('Photo is too large');
+  var name = 'receipt_' + String(req.expenseId || '').replace(/[^\w-]/g, '').slice(0, 40) + '_' + Date.now() + '.jpg';
+  var file = receiptFolder_().createFile(Utilities.newBlob(Utilities.base64Decode(data), 'image/jpeg', name));
+  return { ok: true, id: file.getId() };
+}
+function receiptGet_(me, req) {
+  var f = receiptFile_(req.id);
+  return { ok: true, data: Utilities.base64Encode(f.getBlob().getBytes()) };
+}
+function receiptDel_(me, req) {
+  try { receiptFile_(req.id).setTrashed(true); } catch (e) {}
   return { ok: true };
 }

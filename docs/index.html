@@ -162,10 +162,20 @@ button.rmain{background:none;padding:0;color:inherit}
 .logo{width:72px;height:72px;border-radius:20px;margin:26px auto 14px;display:block}
 .center{text-align:center}
 .hint{font-size:13px;color:var(--muted);margin-top:6px}
+.rcview{position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:16px}.rcview img{max-width:100%;max-height:82vh;border-radius:10px}
 input[type=range]{width:100%;accent-color:var(--accent)}
 .catrow{display:grid;grid-template-columns:56px 1fr 40px;gap:8px;margin-bottom:8px}
 .catrow input:first-child{text-align:center;padding-left:4px;padding-right:4px}
 .budrow{display:grid;grid-template-columns:1fr 130px;gap:10px;align-items:center;margin-bottom:8px}
+ol.steps{margin:0;padding-left:20px;font-size:14px;line-height:1.5}ol.steps li{margin:0 0 6px}
+details>summary{cursor:pointer;list-style:none}details>summary::-webkit-details-marker{display:none}details>summary::before{content:'▸ ';color:var(--muted)}details[open]>summary::before{content:'▾ '}
+.thumb{width:84px;height:84px;border-radius:12px;object-fit:cover;border:1px solid var(--line);background:var(--surface2);display:block}
+.goalbar{height:10px;border-radius:6px;background:var(--surface2);overflow:hidden;margin:10px 0 6px}.goalbar i{display:block;height:100%;background:var(--accent,#0f766e);border-radius:6px}
+#lock{position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;gap:14px;text-align:center}
+#lock .dots{display:flex;gap:12px;margin:6px 0}#lock .dots i{width:14px;height:14px;border-radius:50%;border:2px solid var(--ink);display:block}#lock .dots i.on{background:var(--ink)}
+#lock .pad{display:grid;grid-template-columns:repeat(3,72px);gap:12px}#lock .pad button{height:72px;border-radius:50%;border:1px solid var(--line);background:var(--surface);font-size:26px;color:var(--ink)}#lock .pad button.blank{visibility:hidden}
+#lock.shake .dots{animation:shake .35s}@keyframes shake{25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}
+#calcbar{position:fixed;z-index:8000;display:flex;align-items:center;gap:6px;padding:6px;border-radius:14px;background:var(--surface);border:1px solid var(--line);box-shadow:0 6px 20px rgba(0,0,0,.14)}#calcbar[hidden]{display:none}#calcbar button{min-width:42px;height:38px;border-radius:10px;border:0;background:var(--surface2);color:var(--ink);font-size:20px;font-weight:600}#calcbar button[data-op='=']{background:var(--accent-soft);color:var(--accent)}#calcbar #calcPv{font-size:14px;font-weight:600;padding:0 6px;color:var(--muted);white-space:nowrap}
 </style>
 </head>
 <body class="auth">
@@ -194,7 +204,7 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
   del(k) { try { localStorage.removeItem(k); } catch {} }
 };
-const K = { cfg: 'tandem.cfg', state: 'tandem.state', queue: 'tandem.queue', session: 'tandem.session', prefs: 'tandem.prefs', notified: 'tandem.notified', meta: 'tandem.meta' };
+const K = { cfg: 'tandem.cfg', state: 'tandem.state', queue: 'tandem.queue', session: 'tandem.session', prefs: 'tandem.prefs', notified: 'tandem.notified', meta: 'tandem.meta', lock: 'tandem.lock' };
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const pad = n => String(n).padStart(2, '0');
 const toStr = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -252,16 +262,16 @@ const PALETTE = ['#0f766e', '#2563eb', '#d97706', '#c026d3', '#dc2626', '#65a30d
 const USER_COLORS = { u1: '#2563eb', u2: '#c026d3' };
 
 /* ───────────────────────── state ───────────────────────── */
-const blank = () => ({ users: [], expenses: [], cards: [], accounts: [], recurring: [], billPayments: [], settings: {} });
+const blank = () => ({ users: [], expenses: [], cards: [], accounts: [], recurring: [], billPayments: [], inbox: [], settings: {} });
 let cfg = store.get(K.cfg, {});            // {api, demo}
 let session = store.get(K.session, null);  // {token, userId}
 let state = blank();
 let queue = store.get(K.queue, []);
 let prefs = store.get(K.prefs, {});
 let meta = store.get(K.meta, {});
-let ui = { view: 'home', month: monthOf(today()), basis: 'all', filter: { q: '', who: '', cat: '', mode: '', plat: '' } };
+let ui = { view: 'home', month: monthOf(today()), basis: 'all', filter: { q: '', who: '', cat: '', mode: '', plat: '', trip: '' } };
 let syncing = false, syncAgain = false, syncErr = null, syncTimer = null, lastSync = 0, installEvt = null;
-const TABLES = { Expenses: 'expenses', Cards: 'cards', Accounts: 'accounts', Recurring: 'recurring', BillPayments: 'billPayments' };
+const TABLES = { Expenses: 'expenses', Cards: 'cards', Accounts: 'accounts', Recurring: 'recurring', BillPayments: 'billPayments', Inbox: 'inbox' };
 
 /* the data copy lives in IndexedDB (no practical size cap); small settings stay in localStorage */
 const idb = {
@@ -309,6 +319,15 @@ const ucolor = id => user(id).color || USER_COLORS[id];
 const avatar = (id, cls = '') => `<span class="avatar ${cls}" style="background:${esc(ucolor(id))}">${esc((uname(id)[0] || '?').toUpperCase())}</span>`;
 const SPECIAL_CATS = { unaccounted: { id: 'unaccounted', name: 'Unaccounted', emoji: '❓' }, fees: { id: 'fees', name: 'Fees & interest', emoji: '🏦' } };
 const cat = id => S.cats.find(c => c.id === id) || SPECIAL_CATS[id] || { id, name: id || 'Other', emoji: '📦' };
+const CAT_EMOJI = [[/kid|child|baby|school|tuition/, '🧸'], [/educat|course|book|learn|class/, '📚'], [/gym|fitness|sport|yoga/, '🏋️'], [/beauty|salon|groom|spa|hair/, '💇'], [/cloth|fashion|apparel/, '👕'], [/electr|gadget|phone|laptop/, '📱'], [/home|house|furnit|decor|repair|maint/, '🛠️'], [/insur/, '🛡️'], [/invest|sip|mutual|stock|saving/, '📈'], [/loan|emi/, '🏦'], [/donat|charity/, '🤲'], [/parent|family/, '👪'], [/maid|help|cook|clean/, '🧹'], [/office|work/, '💼'], [/party|drink|bar|alcohol/, '🍻'], [/coffee|cafe/, '☕'], [/snack|sweet|dessert/, '🍰'], [/vacation|trip|holiday/, '🏖️'], [/car|bike|vehicle|service/, '🚗'], [/medic|doctor|hospital|pharma/, '🩺'], [/gift/, '🎁'], [/pet|cat|dog|vet/, '🐾'], [/game|gaming/, '🎮'], [/music|movie|ott/, '🎵'], [/wedding|function|festival/, '🎉']];
+const guessEmoji = n => (CAT_EMOJI.find(([r]) => r.test(n.toLowerCase())) || [0, '🏷️'])[1];
+function addCategory(name, emoji) {   // returns the id; reuses a category with the same name (and brings back a removed one)
+  name = String(name || '').trim().slice(0, 30); if (!name) return '';
+  emoji = String(emoji || '').trim().slice(0, 4) || guessEmoji(name);
+  const same = S.cats.find(c => c.name.toLowerCase() === name.toLowerCase());
+  if (same) { if (same.archived) setSetting('categories', S.cats.map(c => c === same ? { ...c, archived: false } : c)); return same.id; }
+  const id = 'c' + uid(); setSetting('categories', [...S.cats, { id, name, emoji }]); return id;
+}
 const recons = () => state.settings.recon || {};
 const setRecon = (id, total) => setSetting('recon', { ...recons(), [id]: { total, at: today() } });
 let reconDraft = {};
@@ -320,9 +339,13 @@ const IN_KINDS = [['salary', 'Salary', '💼'], ['transfer', 'Transfer', '🔁']
 const inKind = id => IN_KINDS.find(k => k[0] === id) || IN_KINDS[4];
 const UPI_APPS = ['GPay', 'PhonePe', 'Paytm', 'CRED', 'BHIM', 'Amazon Pay', 'WhatsApp Pay'];
 const ACCT_MODES = ['upi', 'debit_card', 'netbanking'];
-const upiApps = () => [...new Set([...UPI_APPS.slice(0, 5), ...liveAccts().map(a => a.upiApp), ...(state.settings.upiApps || [])].filter(Boolean))];
+const appsOf = a => String((a && a.upiApp) || '').split(',').map(x => x.trim()).filter(Boolean);   // an account can be on several UPI apps; first one is the usual one
+const upiApps = () => [...new Set([...UPI_APPS.slice(0, 5), ...liveAccts().flatMap(appsOf), ...(state.settings.upiApps || [])].filter(Boolean))];
+const dcardsOf = a => (Array.isArray(a && a.debitCards) ? a.debitCards : []).filter(c => c && c.id);
+const dcardLabel = c => c.name + (c.last4 ? ' ••' + c.last4 : '');
+const findDcard = id => { for (const a of state.accounts || []) { const c = dcardsOf(a).find(x => x.id === id); if (c) return { ...c, acct: a }; } return null; };
 const liveAccts = () => (state.accounts || []).filter(a => !a.deleted);
-const acctLabel = a => a.name + (a.upiApp ? ' · ' + a.upiApp : '');
+const acctLabel = a => a.name;
 const DAYN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const dayText = d => (d === '1,2,3,4,5' ? 'Mon–Fri' : d.split(',').filter(Boolean).sort((a, b) => ((+a + 6) % 7) - ((+b + 6) % 7)).map(x => DAYN[x]).join(' '));
 const liveCards = () => state.cards.filter(c => !c.deleted);
@@ -331,6 +354,93 @@ const friendsAll = () => state.settings.friends || [];
 const friendName = id => (friendsAll().find(x => x.id === id) || {}).name || 'Friend';
 const spendOf = e => round2(e.amount - (e.friendsShare || 0));       // what the two of you actually spent
 function friendDues() { const out = []; for (const e of spends()) for (const p of e.friends || []) if (!p.settled && p.amount - (p.paid || 0) > 0.005) out.push({ id: p.id, e, amount: round2(p.amount - (p.paid || 0)), full: p.amount }); return out; }
+
+/* trips & events: a tag on expenses with its own totals and settle-up */
+const tripsAll = () => state.settings.trips || [];
+const tripOf = id => tripsAll().find(t => t.id === id);
+const tripFor = date => { const l = tripsAll().filter(t => !t.archived && t.start && t.end && date >= t.start && date <= t.end); return l.length === 1 ? l[0] : null; };
+const tripLabel = t => (t.emoji || '🧳') + ' ' + t.name;
+/* savings goals */
+const goalsAll = () => state.settings.goals || [];
+const goalSaved = g => round2((g.adds || []).reduce((x, a) => x + (Number(a.amount) || 0), 0));
+/* card rewards: a base % plus % for particular platforms or categories */
+const rewardRules = c => (c && c.rewards && Array.isArray(c.rewards.rules) ? c.rewards.rules : []);
+const hasRewards = c => !!(c && c.rewards && (Number(c.rewards.base) > 0 || rewardRules(c).length));
+function rewardPct(c, e) {
+  if (!hasRewards(c)) return 0;
+  const r = rewardRules(c), hit = (e.platform && r.find(x => x.k === 'plat:' + e.platform)) || r.find(x => x.k === 'cat:' + e.category);
+  return Number(hit ? hit.pct : c.rewards.base) || 0;
+}
+const rewardOf = (c, e) => round2(e.amount * rewardPct(c, e) / 100);
+function bestCard(payer, e) {
+  const l = liveCards().filter(c => c.owner === payer && hasRewards(c)).map(c => ({ c, pct: rewardPct(c, e) })).filter(x => x.pct > 0).sort((a, b) => b.pct - a.pct);
+  return l.length ? l[0] : null;
+}
+
+/* bank SMS → a ready-to-save entry */
+const SMS_OUT = /\b(debited|debit|spent|paid|sent|withdrawn|purchase|txn of|transaction of|used)\b/i, SMS_IN = /\b(credited|received|deposited|refund(?:ed)?|reversed)\b/i;
+const MON3 = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+const tidyName = n => n.replace(/[_.]+/g, ' ').replace(/\s+/g, ' ').trim().replace(/\S+/g, w => w.length <= 4 && w === w.toUpperCase() && !/[aeiou]/i.test(w) ? w : w[0].toUpperCase() + w.slice(1).toLowerCase());
+function parseSms(text, at) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  const am = t.match(/(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
+  const amount = am ? round2(Number(am[1].replace(/,/g, ''))) : 0;
+  const o = t.search(SMS_OUT), i = t.search(SMS_IN);
+  const dir = i >= 0 && (o < 0 || i < o) ? 'in' : 'out';
+  const l4 = t.match(/(?:a\/?c|acct|account|card|ac)\.?\s*(?:no\.?\s*)?(?:ending\s*(?:with|in)?\s*)?[x*X.\s-]*(\d{3,4})\b/i);
+  const low = t.toLowerCase();
+  let mode = /\batm\b|cash withdrawal/.test(low) ? 'atm' : /credit card|\bcc\b/.test(low) ? 'credit_card' : /debit card|\bdc\b|\bpos\b/.test(low) ? 'debit_card' : /upi|vpa|@/.test(low) ? 'upi' : /neft|imps|rtgs|net ?banking|ib\b/.test(low) ? 'netbanking' : /card/.test(low) ? 'card' : '';
+  let who = '';
+  const bad = n => !n || /a\/c|account|bank card|your |^card|^upi$|^vpa$|^atm$|^(rs|inr)\b|\bx{2,}\d/i.test(n);
+  const vpa = t.match(dir === 'out' ? /\bto\s+(?:vpa\s+)?([\w.\-]+@[\w.\-]+)/i : /\bfrom\s+(?:vpa\s+)?([\w.\-]+@[\w.\-]+)/i) || t.match(/\b(?:vpa)\s+([\w.\-]+@[\w.\-]+)/i);
+  const at1 = t.match(/\bat\s+([A-Za-z0-9][\w&'*\- ]{1,40}?)(?=\s+(?:on|via|ref|using|for|avl|txn|at)\b|[.,;:]|\s+\d|$)/i);
+  const stop = "(?=\\s+(?:on|via|ref|upi|avl|from|to|is|has|using)\\b|[.,;:(]|\\s+\\d|$)";
+  const to1 = dir === 'out' ? t.match(new RegExp("\\b(?:to|towards|for)\\s+([A-Za-z][\\w&'\\- ]{1,40}?)" + stop, 'i'))
+    : t.match(new RegExp("\\bfrom\\s+([A-Za-z][\\w&'\\- ]{1,40}?)" + stop, 'i')) || t.match(new RegExp("\\bby\\s+(?:neft|imps|rtgs|upi)?\\s*(?:from\\s+)?([A-Za-z][\\w&'\\- ]{1,40}?)" + stop, 'i'));
+  if (at1 && !bad(at1[1])) who = at1[1];
+  else if (vpa) who = vpa[1].split('@')[0].replace(/\d{5,}/g, '').replace(/^(paytmqr|bharatpe|q\d+|upi)/i, '') || vpa[1];
+  else if (to1 && !bad(to1[1])) who = to1[1];
+  who = who ? tidyName(who).slice(0, 40) : '';
+  let date = '';
+  const d1 = t.match(/\b(\d{4})-(\d{2})-(\d{2})\b/) || null, d2 = t.match(/\b(\d{1,2})[-\/ ]([A-Za-z]{3}|\d{1,2})[-\/ ,]+(\d{2,4})\b/);
+  if (d1) date = `${d1[1]}-${d1[2]}-${d1[3]}`;
+  else if (d2) { const mo = isNaN(d2[2]) ? MON3[d2[2].toLowerCase()] : Number(d2[2]); let y = Number(d2[3]); if (y < 100) y += 2000; if (mo >= 1 && mo <= 12 && Number(d2[1]) <= 31) date = `${y}-${pad(mo)}-${pad(Number(d2[1]))}`; }
+  const rec = at ? toStr(new Date(at)) : today();
+  if (!date || !/^\d{4}-\d\d-\d\d$/.test(date) || date > rec || diffDays(rec, date) > 45) date = rec;
+  const ref = (t.match(/ref(?:erence)?\.?\s*(?:no\.?)?\s*[:#]?\s*(\d{6,})/i) || [])[1] || '';
+  return { amount, dir, last4: l4 ? l4[1] : '', mode, who, date, ref };
+}
+/* what an inbox message most likely is, using your cards and accounts */
+function smsGuess(m) {
+  const p = parseSms(m.text, m.at), owner = m.owner || meId(), g = { p, paidBy: owner, mode: '', cardId: '', accountId: '', debitCardId: '', platform: '', category: '', description: p.who };
+  const end = (x, y) => x && y && (x === y || x.slice(-3) === y.slice(-3) && y.length === 3);
+  if (p.last4) {
+    const cc = liveCards().find(c => c.owner === owner && end(c.last4, p.last4));
+    const dc = !cc && liveAccts().filter(a => a.owner === owner).flatMap(a => dcardsOf(a).map(c => ({ c, a }))).find(x => end(x.c.last4, p.last4));
+    const ac = !cc && !dc && liveAccts().find(a => a.owner === owner && end(a.last4, p.last4));
+    if (cc) { g.mode = 'credit_card'; g.cardId = cc.id; }
+    else if (dc) { g.mode = p.mode === 'upi' || p.mode === 'netbanking' ? p.mode : 'debit_card'; g.accountId = dc.a.id; if (g.mode === 'debit_card') g.debitCardId = dc.c.id; }
+    else if (ac) { g.accountId = ac.id; g.mode = p.mode === 'card' || p.mode === 'debit_card' ? 'debit_card' : p.mode === 'netbanking' ? 'netbanking' : 'upi'; if (g.mode === 'upi') g.upiApp = appsOf(ac)[0] || ''; if (g.mode === 'debit_card' && dcardsOf(ac).length === 1) g.debitCardId = dcardsOf(ac)[0].id; }
+  }
+  if (!g.mode) g.mode = p.mode === 'card' ? 'credit_card' : p.mode === 'atm' ? 'cash' : p.mode || 'upi';
+  if (p.who) {
+    const flat = p.who.toLowerCase().replace(/\s/g, '');
+    g.platform = [...new Set([...S.platforms, ...spends().map(e => e.platform).filter(Boolean)])].find(n => flat.includes(n.toLowerCase().replace(/\s/g, ''))) || '';
+    const prev = spends().sort((a, b) => b.createdAt - a.createdAt).find(e => (g.platform && e.platform === g.platform) || e.description.toLowerCase() === p.who.toLowerCase());
+    g.category = (prev && prev.category) || guessCat(p.who.toLowerCase()) || '';
+    if (g.platform && !prev) g.description = g.platform;
+    else if (prev) g.description = prev.description;
+  }
+  return g;
+}
+/* an entry already logged that matches this message (same person, amount within ₹1, within 2 days) */
+function smsLogged(m, g) {
+  const used = new Set(state.inbox.filter(x => x.id !== m.id && x.expenseId).map(x => x.expenseId));
+  const pool = g.p.dir === 'in' ? incomes() : g.p.mode === 'atm' ? live().filter(e => e.type === 'transfer') : spends();
+  return pool.filter(e => !used.has(e.id) && e.paidBy === g.paidBy && Math.abs(e.amount - g.p.amount) <= 1 && Math.abs(diffDays(e.date, g.p.date)) <= 2)
+    .sort((a, b) => Math.abs(diffDays(a.date, g.p.date)) - Math.abs(diffDays(b.date, g.p.date)))[0] || null;
+}
+const inboxNew = (who = meId()) => state.inbox.filter(m => m.status === 'new' && m.owner === who);
 const share = async (text, done) => { try { if (navigator.share) await navigator.share({ text }); else { await navigator.clipboard.writeText(text); toast(done || 'Copied'); } } catch { try { await navigator.clipboard.writeText(text); toast(done || 'Copied'); } catch {} } };
 
 /* ───────────────────────── normalise server data ───────────────────────── */
@@ -353,14 +463,15 @@ function norm(d) {
     users: (d.users || []).map(u => ({ id: s(u.id), name: s(u.name), email: s(u.email), color: s(u.color), googleEmail: s(u.googleEmail) })),
     expenses: (d.expenses || []).map(e => ({
       id: s(e.id), type: s(e.type) || 'expense', date: s(e.date).slice(0, 10), amount: n(e.amount), description: s(e.description),
-      category: s(e.category), paidBy: s(e.paidBy), mode: s(e.mode), cardId: s(e.cardId), accountId: s(e.accountId), upiApp: s(e.upiApp), splitType: s(e.splitType),
-      share1: n(e.share1), share2: n(e.share2), notes: s(e.notes), platform: s(e.platform), device: s(e.device), cats: parseCats(e.cats), splitInfo: parseObj(e.splitInfo), toAccountId: s(e.toAccountId), refundOf: s(e.refundOf), recurringId: s(e.recurringId), settledBy: s(e.settledBy), friendsShare: n(e.friendsShare), friends: parseFriends(e.friends), createdBy: s(e.createdBy),
+      category: s(e.category), paidBy: s(e.paidBy), mode: s(e.mode), cardId: s(e.cardId), accountId: s(e.accountId), upiApp: s(e.upiApp), debitCardId: s(e.debitCardId), splitType: s(e.splitType),
+      share1: n(e.share1), share2: n(e.share2), notes: s(e.notes), platform: s(e.platform), device: s(e.device), cats: parseCats(e.cats), splitInfo: parseObj(e.splitInfo), toAccountId: s(e.toAccountId), refundOf: s(e.refundOf), trip: s(e.trip), receipt: s(e.receipt), recurringId: s(e.recurringId), settledBy: s(e.settledBy), friendsShare: n(e.friendsShare), friends: parseFriends(e.friends), createdBy: s(e.createdBy),
       createdAt: n(e.createdAt), updatedAt: n(e.updatedAt), deleted: b(e.deleted)
     })).filter(e => /^\d{4}-\d{2}-\d{2}$/.test(e.date)),
-    cards: (d.cards || []).map(c => ({ id: s(c.id), owner: s(c.owner), name: s(c.name), last4: s(c.last4), statementDay: n(c.statementDay) || 1, dueDay: n(c.dueDay) || 1, limit: n(c.limit), deleted: b(c.deleted) })),
+    cards: (d.cards || []).map(c => ({ id: s(c.id), owner: s(c.owner), name: s(c.name), last4: s(c.last4), statementDay: n(c.statementDay) || 1, dueDay: n(c.dueDay) || 1, limit: n(c.limit), rewards: parseObj(c.rewards), deleted: b(c.deleted) })),
     recurring: (d.recurring || []).map(r => ({ id: s(r.id), description: s(r.description), amount: n(r.amount), category: s(r.category), paidBy: s(r.paidBy), mode: s(r.mode), cardId: s(r.cardId), splitType: s(r.splitType) || 'shared', payerPct: n(r.payerPct), dayOfMonth: n(r.dayOfMonth) || 1, active: b(r.active), deleted: b(r.deleted), accountId: s(r.accountId), schedule: s(r.schedule) === 'ask' ? 'ask' : 'monthly', days: s(r.days), askTime: /^\d{2}:\d{2}$/.test(s(r.askTime)) ? s(r.askTime) : '13:00', startDate: s(r.startDate).slice(0, 10) })),
-    accounts: (d.accounts || []).map(a => ({ id: s(a.id), owner: s(a.owner), name: s(a.name), upiApp: s(a.upiApp), balance0: n(a.balance0), balance0At: n(a.balance0At), deleted: b(a.deleted) })),
+    accounts: (d.accounts || []).map(a => ({ id: s(a.id), owner: s(a.owner), name: s(a.name), last4: s(a.last4), upiApp: s(a.upiApp), debitCards: (v => Array.isArray(v) ? v : [])(parseObj(a.debitCards)), balance0: n(a.balance0), balance0At: n(a.balance0At), deleted: b(a.deleted) })),
     billPayments: (d.billPayments || []).map(p => ({ id: s(p.id), cardId: s(p.cardId), cycle: s(p.cycle), paidOn: s(p.paidOn), paidBy: s(p.paidBy), deleted: b(p.deleted) })),
+    inbox: (d.inbox || []).map(m => ({ id: s(m.id), owner: s(m.owner), at: n(m.at), sender: s(m.sender), text: s(m.text), status: s(m.status) || 'new', expenseId: s(m.expenseId) })),
     settings
   };
 }
@@ -535,7 +646,7 @@ function askPrompts() {
 }
 function askExpense(p) {
   const r = p.r;
-  return { id: p.id, type: 'expense', date: p.date, amount: r.amount, description: r.description, category: r.category, paidBy: r.paidBy, mode: r.mode, cardId: r.cardId, accountId: r.accountId || '', upiApp: r.mode === 'upi' ? (liveAccts().find(a => a.id === r.accountId) || {}).upiApp || '' : '', splitType: r.splitType, ...computeShares(r.amount, r.paidBy, r.splitType, r.payerPct), notes: '', recurringId: r.id, createdBy: meId(), createdAt: Date.now(), deleted: false };
+  return { id: p.id, type: 'expense', date: p.date, amount: r.amount, description: r.description, category: r.category, paidBy: r.paidBy, mode: r.mode, cardId: r.cardId, accountId: r.accountId || '', upiApp: r.mode === 'upi' ? appsOf(liveAccts().find(a => a.id === r.accountId))[0] || '' : '', debitCardId: r.mode === 'debit_card' ? (dcardsOf(liveAccts().find(a => a.id === r.accountId))[0] || {}).id || '' : '', splitType: r.splitType, ...computeShares(r.amount, r.paidBy, r.splitType, r.payerPct), notes: '', recurringId: r.id, createdBy: meId(), createdAt: Date.now(), deleted: false };
 }
 function doAsk(id, action) {
   const p = askPrompts().find(x => x.id === id); if (!p) return;
@@ -613,8 +724,8 @@ function openSheet(title, html) {
 }
 function closeSheet() { $('#sheet').innerHTML = ''; }
 const chip = (on, attrs, label) => `<button type="button" class="chip ${on ? 'on' : ''}" ${attrs}>${label}</button>`;
-const TITLES = { home: 'Tandem', expenses: 'Expenses', insights: 'Insights', more: 'More', cards: 'Credit cards', recurring: 'Recurring', budgets: 'Budgets', categories: 'Categories', settings: 'Settings', friends: 'Friends', accounts: 'Bank accounts' };
-const SUB = ['cards', 'recurring', 'budgets', 'categories', 'settings', 'friends', 'accounts'];
+const TITLES = { inbox: 'SMS inbox', trips: 'Trips & events', goals: 'Savings goals', home: 'Tandem', expenses: 'Expenses', insights: 'Insights', more: 'More', cards: 'Credit cards', recurring: 'Recurring', budgets: 'Budgets', categories: 'Categories', settings: 'Settings', friends: 'Friends', accounts: 'Bank accounts' };
+const SUB = ['inbox', 'trips', 'goals', 'cards', 'recurring', 'budgets', 'categories', 'settings', 'friends', 'accounts'];
 function go(v) { if (location.hash !== '#/' + v) location.hash = '#/' + v; else { ui.view = v; render(); } }
 
 function render(soft) {
@@ -627,8 +738,67 @@ function render(soft) {
     <button data-act="nav" data-v="settings" aria-label="Settings">${avatar(meId())}</button>`;
   $$('nav.bottom button[data-v]').forEach(b => b.classList.toggle('on', b.dataset.v === (sub ? 'more' : v)));
   $('#view').innerHTML = (VIEWS[v] || VIEWS.home)();
-  if (v === 'settings') mountGoogleLink();
+  if (v === 'settings') { mountGoogleLink(); mountLock(); }
   setStatus();
+}
+
+
+/* ───────────────────────── app lock (this device only) ───────────────────────── */
+let lockCfg = store.get(K.lock, null);   // { salt, hash, len, after (minutes), bio (credential id) }
+let hiddenAt = 0, isLocked = false, lockFails = 0, lockUntil = 0;
+const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const unb64 = v => Uint8Array.from(atob(v), c => c.charCodeAt(0));
+async function pinHash(pin, salt) {
+  const k = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  return b64(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: unb64(salt), iterations: 150000, hash: 'SHA-256' }, k, 256));
+}
+async function setPin(pin) { const salt = b64(crypto.getRandomValues(new Uint8Array(16))); lockCfg = { after: 1, ...(lockCfg || {}), salt, len: pin.length, hash: await pinHash(pin, salt) }; store.set(K.lock, lockCfg); }
+const bioAvail = async () => { try { return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); } catch { return false; } };
+async function bioRegister() {
+  const nm = uname(meId()) || 'Tandem';
+  const cred = await navigator.credentials.create({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: 'Tandem' }, user: { id: crypto.getRandomValues(new Uint8Array(16)), name: nm, displayName: nm },
+    pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }], authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' }, timeout: 60000, attestation: 'none' } });
+  lockCfg = { ...lockCfg, bio: b64(cred.rawId) }; store.set(K.lock, lockCfg);
+}
+async function bioCheck() {     // true only if the phone confirmed it's you (Face ID / fingerprint / device PIN)
+  if (!lockCfg || !lockCfg.bio) return false;
+  try {
+    const a = await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: 'public-key', id: unb64(lockCfg.bio) }], userVerification: 'required', timeout: 60000 } });
+    return !!(a && a.response && a.response.authenticatorData && (new Uint8Array(a.response.authenticatorData)[32] & 4));
+  } catch { return false; }
+}
+function showLock() {
+  if (!lockCfg || !lockCfg.hash || !session || isLocked) return;
+  isLocked = true; let pin = '', busy = false;
+  const el = document.createElement('div'); el.id = 'lock'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Tandem is locked'); document.body.appendChild(el);
+  const draw = msg => { el.innerHTML = `<div style="font-size:40px">🔒</div><b style="font-size:20px">Tandem is locked</b><small class="muted" id="lkMsg" aria-live="polite">${esc(msg || 'Enter your PIN')}</small>
+    <div class="dots">${Array.from({ length: lockCfg.len || 4 }, (_, i) => `<i class="${i < pin.length ? 'on' : ''}"></i>`).join('')}</div>
+    <div class="pad">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 'bio', 0, 'del'].map(k => k === 'bio' ? (lockCfg.bio ? '<button data-k="bio" aria-label="Unlock with Face ID or fingerprint">👤</button>' : '<button class="blank" aria-hidden="true" tabindex="-1"></button>') : k === 'del' ? '<button data-k="del" aria-label="Delete">⌫</button>' : `<button data-k="${k}">${k}</button>`).join('')}</div>
+    <button class="btn sm" data-k="forgot" style="margin-top:6px">Forgot PIN?</button>`; };
+  const done = () => { isLocked = false; lockFails = 0; document.removeEventListener('keydown', onKey, true); el.remove(); };
+  const tryPin = async () => {
+    if (Date.now() < lockUntil) { pin = ''; return draw(`Too many tries. Wait ${Math.ceil((lockUntil - Date.now()) / 1000)} s`); }
+    busy = true; const ok = (await pinHash(pin, lockCfg.salt)) === lockCfg.hash; busy = false;
+    if (ok) return done();
+    lockFails++; if (lockFails >= 5) lockUntil = Date.now() + 30000 * 2 ** Math.min(lockFails - 5, 4);
+    pin = ''; draw(lockFails >= 5 ? 'Wrong PIN. Wait 30 s and try again' : 'Wrong PIN'); el.classList.add('shake'); setTimeout(() => el.classList.remove('shake'), 400);
+  };
+  const press = k => {
+    if (busy) return;
+    if (k === 'del') { pin = pin.slice(0, -1); return draw(); }
+    if (k === 'bio') return bioCheck().then(ok => ok ? done() : draw('Not recognised. Use your PIN'));
+    if (k === 'forgot') { if (confirm('Sign out of this device? Your data is safe in the sheet. Sign back in with your password or Google, then set a new PIN.')) { store.del(K.lock); lockCfg = null; done(); A.logout(); } return; }
+    if (/^\d$/.test(k) && pin.length < (lockCfg.len || 4)) { pin += k; draw(); if (pin.length === (lockCfg.len || 4)) tryPin(); }
+  };
+  const onKey = ev => { if (!isLocked || ev.key === 'Tab') return; if (/^\d$/.test(ev.key)) press(ev.key); else if (ev.key === 'Backspace') press('del'); else if (ev.key === 'Enter' && ev.target.closest && ev.target.closest('#lock [data-k]')) return; ev.preventDefault(); ev.stopPropagation(); };
+  el.onclick = ev => { const b = ev.target.closest('[data-k]'); if (b) press(b.dataset.k); };
+  document.addEventListener('keydown', onKey, true);
+  draw();
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+}
+function mountLock() {
+  const b = $('#bioBtn'); if (!b) return;
+  bioAvail().then(ok => { if (ok) b.hidden = false; else { const h = $('#bioNote'); if (h) h.textContent = 'Face ID / fingerprint is not available in this browser; the PIN still works.'; } });
 }
 
 /* ───────────────────────── views ───────────────────────── */
@@ -649,7 +819,7 @@ function expRow(e) {
   const tag = lent && e.settledBy ? '<small class="muted">settled ✓</small>' : lent > 0 ? `<small class="pos">you lent ${money(lent)}</small>` : lent < 0 ? `<small class="neg">you owe ${money(-lent)}</small>` : `<small class="muted">${e.paidBy === me ? 'just you' : 'just ' + esc(uname(e.paidBy))}</small>`;
   const card = e.cardId && state.cards.find(k => k.id === e.cardId);
   return `<button class="row" data-act="edit" data-id="${esc(e.id)}"><span class="ico">${esc(c.emoji)}</span>
-    <span class="rmain"><b>${esc(e.description || c.name)}</b><small>${esc(you(e.paidBy))} · ${esc(card ? card.name : ((state.accounts || []).find(k => k.id === e.accountId) || {}).name || (e.mode === 'upi' && e.upiApp ? e.upiApp : modeLabel(e.mode)))}${e.mode === 'upi' && e.upiApp && e.accountId ? ' (' + esc(e.upiApp) + ')' : ''} · ${esc(mixed ? e.cats.map(k => cat(k.id).name).join(' + ') : c.name)}${e.platform ? ' · ' + esc(e.platform) + (e.device === 'office' ? ' (office)' : '') : ''}${e.friendsShare ? ' · 👥 ' + money0(e.friendsShare) : ''}${e.createdBy && e.createdBy !== e.paidBy ? ' · added by ' + esc(youL(e.createdBy)) : ''}</small></span>
+    <span class="rmain"><b>${esc(e.description || c.name)}</b><small>${esc(you(e.paidBy))} · ${esc(card ? card.name : e.debitCardId && findDcard(e.debitCardId) ? dcardLabel(findDcard(e.debitCardId)) : ((state.accounts || []).find(k => k.id === e.accountId) || {}).name || (e.mode === 'upi' && e.upiApp ? e.upiApp : modeLabel(e.mode)))}${e.mode === 'upi' && e.upiApp && e.accountId ? ' (' + esc(e.upiApp) + ')' : ''} · ${esc(mixed ? e.cats.map(k => cat(k.id).name).join(' + ') : c.name)}${e.platform ? ' · ' + esc(e.platform) + (e.device === 'office' ? ' (office)' : '') : ''}${e.friendsShare ? ' · 👥 ' + money0(e.friendsShare) : ''}${e.trip && tripOf(e.trip) ? ' · ' + esc(tripLabel(tripOf(e.trip))) : ''}${e.receipt ? ' · 📎' : ''}${e.createdBy && e.createdBy !== e.paidBy ? ' · added by ' + esc(youL(e.createdBy)) : ''}</small></span>
     <span class="ramt"><b>${money(e.amount)}</b>${tag}</span></button>`;
 }
 function quickList() {
@@ -692,7 +862,8 @@ const VIEWS = {
     const askCard = asks.length ? `<div class="card"><h3>Add these?</h3><div class="list">${asks.map(p => `<div class="row"><button class="rmain" data-act="askEdit" data-id="${esc(p.id)}" style="text-align:left"><b>${esc(cat(p.r.category).emoji + ' ' + p.r.description)}</b><small>${esc(dayLabel(p.date))} · ${money(p.r.amount)} · tap to change</small></button><button class="btn sm" data-act="askSkip" data-id="${esc(p.id)}">No</button><button class="btn sm primary" data-act="askAdd" data-id="${esc(p.id)}">Add</button></div>`).join('')}</div></div>` : '';
     const [y, m, d] = today().split('-').map(Number);
     const recent = live().sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt).slice(0, 6);
-    return `${alerts}${nudge}${askCard}
+    const nIn = inboxNew().length, inboxAlert = nIn ? `<button class="alert info" data-act="nav" data-v="inbox" style="width:100%;text-align:left"><span style="font-size:22px">📥</span><span class="grow"><b>${nIn} payment${nIn > 1 ? 's' : ''} from SMS to review</b><small>Tap to add or ignore</small></span><span class="muted">›</span></button>` : '';
+    return `${alerts}${inboxAlert}${nudge}${askCard}
     <div class="card hero"><h3>${balText[0]}</h3><div class="rowflex between"><div><div class="big">${money(Math.abs(bal))}</div><div class="sub">${balText[1]}</div></div>
       ${open.length ? '<button class="btn" data-act="settle">Settle up</button>' : ''}</div></div>
     ${(d => d.length ? `<button class="alert info" data-act="nav" data-v="friends" style="width:100%;text-align:left"><span style="font-size:22px">👥</span><span class="grow"><b>Friends owe ${money(d.reduce((s, x) => s + x.amount, 0))}</b><small>${money(d.filter(x => x.e.paidBy === me0).reduce((s, x) => s + x.amount, 0))} to you · ${money(d.filter(x => x.e.paidBy !== me0).reduce((s, x) => s + x.amount, 0))} to ${esc(uname(ot))}</small></span><span class="muted">›</span></button>` : '')(friendDues())}
@@ -716,6 +887,7 @@ const VIEWS = {
       <select class="in" data-f="who"><option value="">Everyone</option><option value="me" ${f.who === 'me' ? 'selected' : ''}>Paid by you</option><option value="other" ${f.who === 'other' ? 'selected' : ''}>Paid by ${esc(uname(otherId()))}</option><option value="shared" ${f.who === 'shared' ? 'selected' : ''}>Shared only</option><option value="personal" ${f.who === 'personal' ? 'selected' : ''}>Personal only</option><option value="friends" ${f.who === 'friends' ? 'selected' : ''}>With friends</option><option value="income" ${f.who === 'income' ? 'selected' : ''}>Money in</option><option value="transfer" ${f.who === 'transfer' ? 'selected' : ''}>Transfers</option></select>
       <select class="in" data-f="cat"><option value="">All categories</option>${S.cats.map(c => `<option value="${esc(c.id)}" ${f.cat === c.id ? 'selected' : ''}>${esc(c.emoji + ' ' + c.name)}</option>`).join('')}</select>
       <select class="in" data-f="mode"><option value="">All modes</option>${MODES.map(m => `<option value="${m[0]}" ${f.mode === m[0] ? 'selected' : ''}>${m[1]}</option>`).join('')}</select>
+      ${tripsAll().length ? `<select class="in" data-f="trip"><option value="">All trips & events</option>${tripsAll().map(t => `<option value="${esc(t.id)}" ${f.trip === t.id ? 'selected' : ''}>${esc(tripLabel(t))}</option>`).join('')}</select>` : ''}
       <select class="in" data-f="plat"><option value="">All platforms</option>${[...new Set([...S.platforms, ...spends().map(e => e.platform).filter(Boolean)])].map(n => `<option ${f.plat === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>
     </div><div id="explist">${expList()}</div>
     <button class="btn block" data-act="shareList">Share this list</button>`;
@@ -777,7 +949,10 @@ const VIEWS = {
     return `<div class="card"><div class="list">
       ${item('cards', '💳', 'Credit cards', nCards ? `${nCards} card${nCards > 1 ? 's' : ''} · bill dates and due reminders` : 'Add cards to track bills and due dates')}
       ${(n => item('accounts', '🏦', 'Bank accounts & money in', n ? `${n} account${n > 1 ? 's' : ''} · salary, refunds, transfers` : 'Add accounts with their UPI apps, log salary and refunds'))(liveAccts().length)}
+      ${(n => item('inbox', '📥', 'SMS inbox', n ? `${n} payment${n > 1 ? 's' : ''} to review` : 'Forward bank SMS, then add each payment in one tap'))(inboxNew().length)}
       ${item('recurring', '🔁', 'Recurring expenses', nRec ? `${nRec} active` : 'Rent, subscriptions, EMIs — added automatically')}
+      ${(l => item('trips', '🧳', 'Trips & events', l.length ? l.map(t => tripLabel(t)).slice(0, 2).join(' · ') + (l.length > 2 ? ' …' : '') : 'Tag a trip or event, see its own totals and settle it separately'))(tripsAll().filter(t => !t.archived))}
+      ${(l => item('goals', '🐷', 'Savings goals', l.length ? l.map(g => `${g.name} ${Math.round(goalSaved(g) / Math.max(1, g.target) * 100)}%`).slice(0, 2).join(' · ') : 'Save towards something together'))(goalsAll().filter(g => !g.done))}
       ${item('budgets', '🎯', 'Budgets', S.budgets._total ? `${money0(S.budgets._total)} per month` : 'Set monthly limits')}
       ${item('categories', '🏷️', 'Categories', `${S.activeCats.length} categories`)}
       ${(d => item('friends', '👥', 'Friends', d.length ? `${money(d.reduce((s, x) => s + x.amount, 0))} to collect · ${d.length} item${d.length > 1 ? 's' : ''}` : 'Split bills with friends and track who has paid back'))(friendDues())}
@@ -792,6 +967,29 @@ const VIEWS = {
     <p class="hint center">iPhone/iPad: Share → Add to Home Screen · Android/desktop: browser menu → Install app</p>`;
   },
 
+  inbox() {
+    const me = meId(), ot = otherId(), who = ui.inboxWho === ot ? ot : me;
+    const items = state.inbox.filter(m => m.owner === who && m.status === 'new').sort((a, b) => b.at - a.at);
+    const done = state.inbox.filter(m => m.owner === who && m.status !== 'new').sort((a, b) => b.at - a.at).slice(0, 30);
+    const nOther = inboxNew(ot).length;
+    const card = m => {
+      const g = smsGuess(m), p = g.p, hit = smsLogged(m, g), cc = liveCards().find(c => c.id === g.cardId), ac = liveAccts().find(a => a.id === g.accountId), dc = g.debitCardId && findDcard(g.debitCardId);
+      const via = cc ? cc.name + (cc.last4 ? ' ••' + cc.last4 : '') : dc ? dcardLabel(dc) : ac ? ac.name : p.last4 ? '••' + p.last4 + ' (not matched)' : '';
+      const kind = p.dir === 'in' ? 'Money in' : p.mode === 'atm' ? 'Cash withdrawal' : modeLabel(g.mode);
+      const time = new Date(m.at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+      return `<div class="card sms"><div class="rowflex between"><div class="grow"><b style="font-size:20px" class="${p.dir === 'in' ? 'pos' : ''}">${p.dir === 'in' ? '+' : ''}${money(p.amount)}</b> <span class="muted">${esc(g.description || p.who || 'Unknown')}</span><br>
+        <small class="muted">${esc([kind, via, p.date !== toStr(new Date(m.at)) ? niceDate(p.date) : '', time].filter(Boolean).join(' · '))}</small></div></div>
+        ${hit ? `<div class="alert info" style="margin:10px 0 0"><span class="grow"><b>Looks already logged</b><small>“${esc(hit.description)}” ${money(hit.amount)} · ${esc(niceDate(hit.date))}</small></span><button class="btn sm" data-act="smsLink" data-id="${esc(m.id)}" data-e="${esc(hit.id)}">That's it</button></div>` : ''}
+        <details style="margin-top:8px"><summary class="muted" style="font-size:13px">Message</summary><p class="hint" style="margin:6px 0 0;white-space:pre-wrap">${esc(m.text)}</p></details>
+        <div class="rowflex" style="margin-top:10px">${p.amount ? `<button class="btn primary grow" data-act="smsAdd" data-id="${esc(m.id)}">${p.dir === 'in' ? 'Add money in' : p.mode === 'atm' ? 'Add withdrawal' : 'Add expense'}</button>` : ''}<button class="btn grow" data-act="smsIgnore" data-id="${esc(m.id)}">Ignore</button></div></div>`;
+    };
+    return `${nOther || ui.inboxWho === ot ? `<div class="seg" style="margin-bottom:12px"><button class="${who === me ? 'on' : ''}" data-act="inboxWho" data-v="${me}">Yours${inboxNew(me).length ? ' · ' + inboxNew(me).length : ''}</button><button class="${who === ot ? 'on' : ''}" data-act="inboxWho" data-v="${ot}">${esc(uname(ot))}'s${nOther ? ' · ' + nOther : ''}</button></div>` : ''}
+    ${items.length ? items.map(card).join('') : `<div class="card empty"><b>📥</b>${state.inbox.some(m => m.owner === who) ? 'All caught up.' : who === me ? 'Nothing here yet.<br>Forward your bank SMS and each payment shows up here, filled in, to add with one tap.' : 'Nothing from ' + esc(uname(ot)) + ' yet.'}</div>`}
+    ${who === me ? `<div class="rowflex"><button class="btn primary grow" data-act="smsSetup">${state.inbox.some(m => m.owner === me && m.sender !== 'pasted') ? 'Forwarding setup' : 'Set up SMS forwarding'}</button><button class="btn grow" data-act="smsPaste">Paste a message</button></div>` : ''}
+    ${done.length ? `<details class="card" style="margin-top:14px"><summary><b>Handled</b> <span class="muted">· ${done.length}</span></summary><div class="list" style="margin-top:8px">${done.map(m => { const p = parseSms(m.text, m.at); return `<div class="row"><span class="rmain"><b>${money(p.amount)} · ${esc(p.who || 'Unknown')}</b><small>${m.status === 'added' ? 'Added' : 'Ignored'} · ${esc(niceDate(toStr(new Date(m.at))))}</small></span><button class="btn sm" data-act="smsUndo" data-id="${esc(m.id)}">Undo</button></div>`; }).join('')}</div></details>` : ''}
+    <p class="hint">Only messages about payments are kept (no OTPs or offers). The text is stored in your sheet's Inbox tab, which ${esc(uname(ot))} can also see.</p>`;
+  },
+
   cards() {
     const cs = liveCards().sort((a, b) => (a.owner === meId() ? -1 : 1) - (b.owner === meId() ? -1 : 1));
     return `${cs.length ? cs.map(c => {
@@ -803,6 +1001,7 @@ const VIEWS = {
         ${c.limit ? `<div class="bar"><i style="width:${Math.min(100, (i.unbilled + (i.paid ? 0 : i.billed)) / c.limit * 100).toFixed(1)}%"></i></div><small>${money0(Math.max(0, c.limit - i.unbilled - (i.paid ? 0 : i.billed)))} available of ${money0(c.limit)}</small>` : ''}</div>
         <div class="st"><div><small>Last bill · ${niceDate(i.stmt)}</small><div><b>${money(i.billed)}</b> ${pill}</div>${i.billed > 0 ? `<small>Pay by ${niceDate(i.due)}</small>` : ''}</div>
         ${i.billed > 0 ? `<button class="btn sm" data-act="${i.paid ? 'unmarkPaid' : 'markPaid'}" data-id="${esc(c.id)}">${i.paid ? 'Undo' : 'Mark paid'}</button>` : ''}</div>
+        ${hasRewards(c) ? (r => `<small style="display:block;margin-top:8px">🎁 ≈ ${money0(r)} rewards on this cycle so far</small>`)(spends().filter(e => e.cardId === c.id && e.date > i.stmt).reduce((x, e) => x + rewardOf(c, e), 0)) : ''}
         <div class="rowflex between" style="margin-top:10px"><small>${(rc => rc ? 'Checked against statement ✓ ' + money(rc.total) : 'Not checked against the statement yet')(recons()[c.id + '_' + i.stmt])}</small><button class="btn sm" data-act="reconcile" data-kind="card" data-id="${esc(c.id)}">Reconcile</button></div></div>`;
     }).join('') : '<div class="card empty"><b>💳</b>Add a credit card with its bill date and due date.<br>Tandem totals each cycle and reminds you before it is due.</div>'}
     <button class="btn primary block" data-act="editCard">Add credit card</button>
@@ -814,7 +1013,7 @@ const VIEWS = {
     const as = liveAccts().sort((a, b) => (a.owner === me ? 0 : 1) - (b.owner === me ? 0 : 1));
     const loose = incomes().filter(e => monthOf(e.date) === ym && !e.accountId);
     return `<p class="hint" style="margin:0 0 10px">${esc(monthName(ym))}</p>${as.length ? as.map(a => { const { i, o } = acctFlow(a, e => monthOf(e.date) === ym), since = a.balance0At ? acctFlow(a, e => e.createdAt > a.balance0At) : null;
-      return `<div class="card"><div class="rowflex between"><div class="grow"><b>${esc(a.name)}</b><br><small class="muted">${esc(you(a.owner))}${a.upiApp ? ' · ' + esc(a.upiApp) : ''}</small></div><button class="btn sm" data-act="reconcile" data-kind="acct" data-id="${esc(a.id)}">Reconcile</button><button class="btn sm" data-act="editAcct" data-id="${esc(a.id)}">Edit</button></div>
+      return `<div class="card"><div class="rowflex between"><div class="grow"><b>${esc(a.name)}</b><br><small class="muted">${esc(you(a.owner))}${appsOf(a).length ? ' · ' + esc(appsOf(a).join(', ')) : ''}${dcardsOf(a).length ? ' · 🏧 ' + esc(dcardsOf(a).map(dcardLabel).join(', ')) : ''}</small></div><button class="btn sm" data-act="reconcile" data-kind="acct" data-id="${esc(a.id)}">Reconcile</button><button class="btn sm" data-act="editAcct" data-id="${esc(a.id)}">Edit</button></div>
         <div class="kpis" style="margin-top:12px"><div class="kpi"><small>Money in</small><b class="pos">${money0(i)}</b></div><div class="kpi"><small>Out</small><b>${money0(o)}</b></div><div class="kpi"><small>Net</small><b class="${i - o < 0 ? 'neg' : ''}">${money0(i - o)}</b></div></div>${since ? `<p class="hint">Balance ≈ <b>${money0(a.balance0 + since.i - since.o)}</b> · from ${money0(a.balance0)} you entered on ${niceDate(toStr(new Date(a.balance0At)))}</p>` : ''}</div>`; }).join('') : '<div class="card empty"><b>🏦</b>Add each bank account with the UPI app you use for it.<br>Then pick the account when you log a payment or money coming in.</div>'}
     ${loose.length ? `<p class="hint">${money0(sum(loose))} of money in this month is not tied to an account.</p>` : ''}
     <div class="rowflex"><button class="btn primary grow" data-act="editAcct">Add account</button><button class="btn grow" data-act="addIncome">Add money in</button><button class="btn grow" data-act="addTransfer">Transfer</button></div>
@@ -827,6 +1026,33 @@ const VIEWS = {
     <button class="btn primary block" data-act="editRec">Add recurring expense</button>`;
   },
 
+  trips() {
+    const ts = tripsAll(), act = ts.filter(t => !t.archived).sort((a, b) => (b.start || '').localeCompare(a.start || '')), old = ts.filter(t => t.archived);
+    const row = t => { const l = spends().filter(e => e.trip === t.id), tot = l.reduce((x, e) => x + spendOf(e), 0), open = openItems().filter(e => e.trip === t.id);
+      return `<button class="row" data-act="trip" data-id="${esc(t.id)}"><span class="ico">${esc(t.emoji || '🧳')}</span><span class="rmain"><b>${esc(t.name)}</b><small>${t.start ? esc(niceDate(t.start)) + (t.end && t.end !== t.start ? ' – ' + esc(niceDate(t.end)) : '') + ' · ' : ''}${l.length} expense${l.length === 1 ? '' : 's'}${open.length ? ' · ' + open.length + ' to settle' : l.length ? ' · settled ✓' : ''}</small></span><span class="ramt"><b>${money0(tot)}</b></span></button>`; };
+    return `<div class="card">${act.length ? `<div class="list">${act.map(row).join('')}</div>` : '<div class="empty"><b>🧳</b>No trips or events yet.<br>Add one, and expenses dated inside it are tagged automatically.</div>'}</div>
+    <button class="btn primary block" data-act="editTrip">Add trip or event</button>
+    ${old.length ? `<details class="card" style="margin-top:14px"><summary><b>Finished</b> <span class="muted">· ${old.length}</span></summary><div class="list" style="margin-top:8px">${old.map(row).join('')}</div></details>` : ''}
+    <p class="hint">A trip's spending still counts in its month as usual. The trip just gives you its own total, who paid what, and a settle-up for only those expenses.</p>`;
+  },
+
+  goals() {
+    const gs = goalsAll(), act = gs.filter(g => !g.done), done = gs.filter(g => g.done);
+    const card = g => { const sv = goalSaved(g), pct = Math.min(100, sv / Math.max(1, g.target) * 100), left = Math.max(0, g.target - sv);
+      const months = g.by ? Math.max(1, (Number(g.by.slice(0, 4)) - Number(today().slice(0, 4))) * 12 + Number(g.by.slice(5, 7)) - Number(today().slice(5, 7)) + (g.by.slice(8) >= today().slice(8) ? 1 : 0)) : 0;
+      const whoTxt = g.who === 'both' || !g.who ? 'Together' : you(g.who);
+      return `<div class="card"><div class="rowflex between"><div class="grow"><b style="font-size:17px">${esc((g.emoji || '🐷') + ' ' + g.name)}</b><br><small class="muted">${esc(whoTxt)}${g.by ? ' · by ' + esc(niceDate(g.by)) : ''}</small></div><button class="btn sm" data-act="editGoal" data-id="${esc(g.id)}">Edit</button></div>
+        <div class="goalbar"><i style="width:${pct.toFixed(1)}%"></i></div>
+        <div class="rowflex between"><span><b>${money0(sv)}</b> <span class="muted">of ${money0(g.target)}</span></span><b>${Math.round(pct)}%</b></div>
+        ${g.done ? '' : left > 0 ? `<p class="hint">${money0(left)} to go${months ? ` · about <b>${money0(Math.ceil(left / months))}</b> a month${g.by < today() ? ' (date has passed)' : ''}` : ''}</p>` : '<p class="hint pos">Reached 🎉</p>'}
+        ${g.done ? '' : `<div class="rowflex" style="margin-top:10px"><button class="btn primary grow" data-act="goalAdd" data-id="${esc(g.id)}">Add money</button><button class="btn grow" data-act="goalTake" data-id="${esc(g.id)}">Take out</button></div>`}
+        ${(g.adds || []).length ? `<details style="margin-top:10px"><summary class="muted" style="font-size:13px">History · ${g.adds.length}</summary><div class="list">${g.adds.slice().reverse().slice(0, 30).map(a => `<div class="row"><span class="rmain"><b>${a.amount < 0 ? '−' : '+'}${money(Math.abs(a.amount))}</b><small>${esc(niceDate(a.date))} · ${esc(you(a.by))}${a.note ? ' · ' + esc(a.note) : ''}</small></span></div>`).join('')}</div></details>` : ''}</div>`; };
+    return `${act.length ? act.map(card).join('') : '<div class="card empty"><b>🐷</b>No goals yet.<br>Set a target and a date, then add money as you put it aside.</div>'}
+    <button class="btn primary block" data-act="editGoal">Add a goal</button>
+    ${done.length ? `<details class="card" style="margin-top:14px"><summary><b>Finished</b> <span class="muted">· ${done.length}</span></summary>${done.map(card).join('')}</details>` : ''}
+    <p class="hint">Money you put towards a goal isn't counted as spending. It's a record of what you've set aside, wherever it's kept.</p>`;
+  },
+
   budgets() {
     const b = S.budgets, st = stats(monthOf(today()));
     return `<div class="card"><h3>Monthly household budget</h3><div class="budrow"><span>Overall limit</span><input class="in" inputmode="decimal" data-bud="_total" value="${b._total || ''}" placeholder="No limit"></div><p class="hint">Shown on Home with what is left per day.</p></div>
@@ -835,7 +1061,9 @@ const VIEWS = {
 
   categories() {
     return `<div class="card"><h3>Emoji · name</h3>${S.activeCats.map(c => `<div class="catrow" data-cat="${esc(c.id)}"><input class="in" data-k="emoji" value="${esc(c.emoji)}" maxlength="4" aria-label="Emoji"><input class="in" data-k="name" value="${esc(c.name)}" maxlength="30" aria-label="Name"><button class="x" data-act="delCat" data-id="${esc(c.id)}" aria-label="Remove">✕</button></div>`).join('')}
-    <button class="btn block" data-act="addCat" style="margin-top:6px">Add category</button></div><p class="hint">Removing a category keeps old expenses as they are.</p>
+    <div class="catrow" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)"><input class="in" id="ncEmoji" maxlength="4" placeholder="🏷️" aria-label="Emoji"><input class="in" id="ncName" maxlength="30" placeholder="New category name" aria-label="New category name" autocomplete="off"><button class="btn" data-act="addCat" style="padding:0" aria-label="Add category">＋</button></div>
+    <p class="hint" style="margin-bottom:0">Leave the emoji blank and one is picked from the name.</p></div><p class="hint">Removing a category keeps old expenses as they are.</p>
+    ${S.cats.some(c => c.archived) ? `<div class="card"><h3>Removed</h3><div class="chips">${S.cats.filter(c => c.archived).map(c => `<button class="chip" data-act="restoreCat" data-id="${esc(c.id)}">${esc(c.emoji + ' ' + c.name)} ↺</button>`).join('')}</div><p class="hint">Tap to bring one back.</p></div>` : ''}
     <div class="card"><h3>Platforms</h3><div class="chips">${S.platforms.map(n => `<button class="chip" data-act="delPlat" data-n="${esc(n)}">${esc(n)} ✕</button>`).join('')}<button class="chip on" data-act="addPlat">+ Add</button></div><p class="hint">Apps and sites you order from. Tap one to remove it from the list.</p></div>`;
   },
 
@@ -876,6 +1104,12 @@ const VIEWS = {
       <label class="f" style="margin:14px 0 0"><span>Google client ID</span><input class="in" id="gCid" value="${esc(state.settings.googleClientId || '')}" placeholder="…apps.googleusercontent.com" autocapitalize="off" autocomplete="off"></label></div>
     <div class="card"><h3>Password</h3><label class="f"><span>Current password</span><input class="in" id="pwOld" type="password" autocomplete="current-password"></label><label class="f"><span>New password</span><input class="in" id="pwNew" type="password" autocomplete="new-password"></label><button class="btn" data-act="changePw">Change password</button></div>
     <div class="card"><h3>Partner & devices</h3><p class="hint" style="margin:0 0 10px">Send this link to your partner or open it on your other devices. It connects the app to your sheet; each person still signs in.</p><button class="btn" data-act="shareLink">Copy setup link</button></div>`}
+    <div class="card"><h3>App lock</h3>${lockCfg && lockCfg.hash ? `<p class="hint" style="margin:0 0 10px">On for this device. Asks for your ${lockCfg.len || 4}-digit PIN${lockCfg.bio ? ' or Face ID / fingerprint' : ''} when you open Tandem.</p>
+      <span class="flabel">Lock after leaving the app</span><div class="seg" style="margin-bottom:12px">${[[0, 'Right away'], [1, '1 min'], [5, '5 min'], [15, '15 min']].map(([v, l]) => `<button class="${Number(lockCfg.after) === v ? 'on' : ''}" data-act="lockAfter" data-v="${v}">${l}</button>`).join('')}</div>
+      <div class="chips">${lockCfg.bio ? '<button class="btn sm" data-act="lockBioOff">Stop using Face ID / fingerprint</button>' : '<button class="btn sm" id="bioBtn" data-act="lockBio" hidden>Also use Face ID / fingerprint</button>'}<button class="btn sm" data-act="lockChange">Change PIN</button><button class="btn sm danger" data-act="lockOff">Turn off</button></div><p class="hint" id="bioNote"></p>`
+      : `<p class="hint" style="margin:0 0 10px">Ask for a PIN (and Face ID / fingerprint) when Tandem opens on this device, so someone holding your unlocked phone can't see your spending.</p>
+      <div class="two"><label class="f"><span>New PIN (4–6 digits)</span><input class="in" id="lkP1" type="password" inputmode="numeric" maxlength="6" autocomplete="new-password"></label><label class="f"><span>Repeat PIN</span><input class="in" id="lkP2" type="password" inputmode="numeric" maxlength="6" autocomplete="new-password"></label></div>
+      <button class="btn" data-act="lockOn">Turn on app lock</button>`}</div>
     <div class="card"><h3>This device</h3><div class="chips"><button class="btn" data-act="logout">${cfg.demo ? 'Exit demo' : 'Sign out'}</button><button class="btn danger" data-act="resetDevice">Reset this device</button></div>
     <p class="hint">${queue.length ? queue.length + ' change(s) waiting to sync. ' : ''}${lastSync ? 'Last synced ' + new Date(lastSync).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) + '.' : ''}</p></div>`;
   }
@@ -883,11 +1117,12 @@ const VIEWS = {
 
 function expFiltered() {
   const f = ui.filter, me = meId(), q = f.q.trim().toLowerCase();
-  let list = live().filter(e => q ? true : monthOf(e.date) === ui.month);
+  let list = live().filter(e => q || f.trip ? true : monthOf(e.date) === ui.month);
   return list.filter(e => {
     if (q && !(e.description + ' ' + e.notes + ' ' + cat(e.category).name + ' ' + (e.platform || '') + ' ' + (e.platform && e.device === 'office' ? 'office' : '')).toLowerCase().includes(q)) return false;
     if (f.cat && e.category !== f.cat && !(e.cats || []).some(c => c.id === f.cat)) return false;
     if (f.plat && e.platform !== f.plat) return false;
+    if (f.trip && e.trip !== f.trip) return false;
     if (f.mode && e.mode !== f.mode) return false;
     if (f.who === 'me' && e.paidBy !== me) return false;
     if (f.who === 'other' && e.paidBy === me) return false;
@@ -904,7 +1139,7 @@ function expList() {
   const list = expFiltered(), q = ui.filter.q.trim();
   if (!list.length) return `<div class="empty"><b>🔍</b>${q ? 'No matches.' : 'Nothing here for ' + esc(monthName(ui.month)) + '.'}</div>`;
   const total = list.filter(e => e.type === 'expense').reduce((s, e) => s + e.amount, 0);
-  let html = `<p class="hint">${list.length} entr${list.length === 1 ? 'y' : 'ies'} · ${money(total)}${q ? ' · all months' : ''}</p><div class="card" style="padding-top:2px">`, cur = '';
+  let html = `<p class="hint">${list.length} entr${list.length === 1 ? 'y' : 'ies'} · ${money(total)}${q || ui.filter.trip ? ' · all months' : ''}</p><div class="card" style="padding-top:2px">`, cur = '';
   const dayTot = {};
   list.forEach(e => { if (e.type === 'expense') dayTot[e.date] = (dayTot[e.date] || 0) + e.amount; });
   list.slice(0, 400).forEach(e => {
@@ -915,6 +1150,36 @@ function expList() {
 }
 
 /* ───────────────────────── expense form ───────────────────────── */
+
+/* receipt photos: shrunk on the phone, kept in a Drive folder, cached on this device */
+async function shrinkImage(file, max = 1600, q = 0.72) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('Not an image')); i.src = url; });
+    const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight)), c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(img.naturalWidth * k)); c.height = Math.max(1, Math.round(img.naturalHeight * k));
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); return c.toDataURL('image/jpeg', q);
+  } finally { URL.revokeObjectURL(url); }
+}
+async function loadReceipt(id) {
+  try { const c = await idb.get('rc_' + id); if (c) return c; } catch {}
+  if (cfg.demo) return '';
+  const r = await api('receiptGet', { token: session.token, id }), src = 'data:image/jpeg;base64,' + r.data;
+  idb.set('rc_' + id, src).catch(() => {}); return src;
+}
+async function uploadReceipt(dataUrl, expenseId) {
+  if (cfg.demo) { const id = 'local_' + uid(); await idb.set('rc_' + id, dataUrl); return id; }
+  const r = await api('receiptUp', { token: session.token, data: dataUrl.split(',')[1], expenseId });
+  idb.set('rc_' + r.id, dataUrl).catch(() => {}); return r.id;
+}
+const dropReceipt = id => { if (!id) return; idb.del('rc_' + id).catch(() => {}); if (!cfg.demo && !id.startsWith('local_')) api('receiptDel', { token: session.token, id }).catch(() => {}); };
+function viewReceipt(src) { const d = document.createElement('div'); d.className = 'rcview'; d.innerHTML = `<img src="${src}" alt="Receipt"><button class="btn" aria-label="Close">Close</button>`; d.onclick = () => d.remove(); document.body.appendChild(d); }
+/* an entry that looks like the one being saved: same amount (within ₹1) within a day */
+function findDup(r) {
+  return spends().filter(e => e.id !== r.id && Math.abs(e.amount - r.amount) <= 1 && Math.abs(diffDays(e.date, r.date)) <= 1)
+    .sort((a, b) => ((b.platform && b.platform === r.platform) - (a.platform && a.platform === r.platform)) || Math.abs(diffDays(a.date, r.date)) - Math.abs(diffDays(b.date, r.date)))[0] || null;
+}
+const ago = ms => { const m = Math.round((Date.now() - ms) / 6e4); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
 function openExpense(existing, preset, after) {
   const me = meId();
   const f = existing ? { ...existing } : { id: uid(), type: 'expense', date: today(), amount: '', description: '', category: '', paidBy: me, mode: prefs.lastMode || 'upi', cardId: '', splitType: prefs.lastSplit || 'shared', notes: '', ...preset };
@@ -935,10 +1200,12 @@ function openExpense(existing, preset, after) {
   const si = existing && existing.splitType === 'custom' ? existing.splitInfo || {} : {};
   if (si.cm === 'items') { f.cm = 'items'; f.own1 = si.own1 || ''; f.own2 = si.own2 || ''; }
   else if (si.cm === 'pct' && isFinite(Number(si.pct))) { f.cm = 'pct'; f.payerPct = Number(si.pct); }
-  if (!existing && f.mode === 'credit_card') f.cardId = prefs.lastCard || '';
+  if (!existing && f.mode === 'credit_card' && !(preset && preset.cardId)) f.cardId = prefs.lastCard || '';
   const locked = !!(existing && existing.settledBy), touched = new Set(Object.keys(preset || {}));
   /* the form stays short: sections are one-line rows until tapped */
-  const open = new Set(); let allCats = false, platQ = false;
+  const open = new Set(); let allCats = false, platQ = false, newCat = false, dupHit = null, dupOk = false, rcSrc = '', rcUp = null;
+  const rcNew = new Set();
+  f.trip = f.trip || ''; f.receipt = f.receipt || '';
   if (f.splitType === 'custom') open.add('split');
   if (Object.keys(f.fr).length) open.add('friends');
   const since = addDays(today(), -120), catUse = {}, platUse = {};
@@ -1008,7 +1275,14 @@ function openExpense(existing, preset, after) {
     else if (!existing && !myAccts.some(a => a.id === f.accountId)) f.accountId = myAccts.length === 1 ? myAccts[0].id : (myAccts.find(a => a.id === prefs.lastAcct) || {}).id || '';
     const acct = myAccts.find(a => a.id === f.accountId);
     if (f.mode !== 'upi') f.upiApp = '';
-    else if (!existing && !touched.has('upiApp') && !f.upiApp) f.upiApp = (acct && acct.upiApp) || prefs.lastUpi || '';
+    else if (!existing && !touched.has('upiApp') && !f.upiApp) f.upiApp = (acct && appsOf(acct).includes(prefs.lastUpi) ? prefs.lastUpi : appsOf(acct)[0]) || prefs.lastUpi || '';
+    const acDc = dcardsOf(acct);
+    if (f.mode !== 'debit_card' || !acct) f.debitCardId = '';
+    else if (!acDc.some(c => c.id === f.debitCardId)) f.debitCardId = acDc.length === 1 ? acDc[0].id : '';
+    const dcard = acDc.find(c => c.id === f.debitCardId);
+    const linkApp = f.mode === 'upi' && acct && f.upiApp && !appsOf(acct).includes(f.upiApp) ? f.upiApp : '';
+    if (!existing && !touched.has('trip')) f.trip = (tripFor(f.date) || {}).id || '';
+    const trips = tripsAll().filter(t => !t.archived || t.id === f.trip);
     const descs = [...new Set(spends().sort((a, b) => b.createdAt - a.createdAt).map(e => e.description).filter(Boolean))].slice(0, 60);
     const stl = locked && state.expenses.find(x => x.id === existing.settledBy);
     let shownCats = allCats ? S.activeCats : catRank.slice(0, 6);
@@ -1026,22 +1300,26 @@ function openExpense(existing, preset, after) {
 
       <div class="fsec"><span class="flabel">Category</span>${f.mixed
         ? `${f.parts.map((p, i) => `<div class="mrow"><select class="in" data-mcat="${i}" aria-label="Category">${catOpts(p.id)}</select><input class="in" data-mamt="${i}" inputmode="decimal" placeholder="Amount" value="${esc(p.amount)}" aria-label="Amount"><button type="button" class="x" data-mdel="${i}" aria-label="Remove">✕</button></div>`).join('')}
-           <div class="chips"><button type="button" class="chip" data-madd="1">+ Add category</button><button type="button" class="chip on" data-mixed="1">🔀 Mixed order ✕</button></div><p class="hint" id="fCatSum"></p>`
-        : `<div class="chips">${shownCats.map(c => chip(f.category === c.id, `data-set="category" data-val="${esc(c.id)}"`, esc(c.emoji + ' ' + c.name))).join('')}${S.activeCats.length > 6 ? `<button type="button" class="chip ghost" data-allcats="1">${allCats ? 'Less ▴' : 'More ▾'}</button>` : ''}<button type="button" class="chip ghost" data-mixed="1">🔀 Mixed</button></div>`}</div>
+           <div class="chips"><button type="button" class="chip" data-madd="1">+ Add row</button><button type="button" class="chip ghost" data-newcat="1">＋ New category</button><button type="button" class="chip on" data-mixed="1">🔀 Mixed order ✕</button></div>${newCat ? `<div class="catrow" style="margin-top:8px"><input class="in" id="fNcE" maxlength="4" placeholder="🏷️" aria-label="Emoji"><input class="in" id="fNcN" maxlength="30" placeholder="New category name" aria-label="New category name" autocomplete="off"><button type="button" class="btn" data-ncadd="1" style="padding:0">Add</button></div><p class="hint" style="margin-top:-2px">Shows up for both of you. Rename or remove it later in More → Categories.</p>` : ''}<p class="hint" id="fCatSum"></p>`
+        : `<div class="chips">${shownCats.map(c => chip(f.category === c.id, `data-set="category" data-val="${esc(c.id)}"`, esc(c.emoji + ' ' + c.name))).join('')}${S.activeCats.length > 6 ? `<button type="button" class="chip ghost" data-allcats="1">${allCats ? 'Less ▴' : 'More ▾'}</button>` : ''}<button type="button" class="chip ghost" data-newcat="1">＋ New</button><button type="button" class="chip ghost" data-mixed="1">🔀 Mixed</button></div>${newCat ? `<div class="catrow" style="margin-top:8px"><input class="in" id="fNcE" maxlength="4" placeholder="🏷️" aria-label="Emoji"><input class="in" id="fNcN" maxlength="30" placeholder="New category name" aria-label="New category name" autocomplete="off"><button type="button" class="btn" data-ncadd="1" style="padding:0">Add</button></div><p class="hint" style="margin-top:-2px">Shows up for both of you. Rename or remove it later in More → Categories.</p>` : ''}`}</div>
 
       <div class="fsec"><span class="flabel">Platform</span>${platQ
         ? `<div class="rowflex"><input class="in" id="fPlatQ" placeholder="Search or type a new one" autocomplete="off" maxlength="24"><button type="button" class="x" data-platq="" aria-label="Close search">✕</button></div><div class="chips" id="fPlatRes" style="margin-top:8px">${platResults('')}</div>`
         : `<div class="chips">${shownPl.map(n => chip(f.platform === n, `data-plat="${esc(n)}"`, esc(n))).join('')}<button type="button" class="chip ghost" data-platq="1">🔍 Search / add</button></div>`}
         ${f.platform ? `<div class="seg" style="margin-top:10px">${Object.keys(DEVICES).map(k => `<button type="button" class="${f.device === k ? 'on' : ''}" data-set="device" data-val="${k}">${DEVICES[k]}</button>`).join('')}</div>` : ''}</div>
 
-      ${sec('pay', 'Paid by', `${esc(you(f.paidBy))} · ${esc(card ? card.name : acct ? acct.name + ' · ' + (f.mode === 'upi' ? f.upiApp || 'UPI' : modeLabel(f.mode)) : f.mode === 'upi' && f.upiApp ? 'UPI · ' + f.upiApp : modeLabel(f.mode))}${!existing && f.paidBy !== me ? ' · on their behalf' : ''}`,
+      ${sec('pay', 'Paid by', `${esc(you(f.paidBy))} · ${esc(card ? card.name : dcard ? dcardLabel(dcard) : acct ? acct.name + ' · ' + (f.mode === 'upi' ? f.upiApp || 'UPI' : modeLabel(f.mode)) : f.mode === 'upi' && f.upiApp ? 'UPI · ' + f.upiApp : modeLabel(f.mode))}${!existing && f.paidBy !== me ? ' · on their behalf' : ''}`,
         `<div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.paidBy === id ? 'on' : ''}" data-set="paidBy" data-val="${id}">${esc(you(id))}</button>`).join('')}</div>
         ${!existing && f.paidBy !== me ? `<p class="hint">Adding this on ${esc(uname(f.paidBy))}'s behalf. It counts as paid by ${esc(uname(f.paidBy))} and is marked “added by you”.</p>` : existing && existing.createdBy && existing.createdBy !== existing.paidBy ? `<p class="hint">Added by ${esc(youL(existing.createdBy))} on ${esc(youL(existing.paidBy))}${existing.paidBy === me ? 'r' : "'s"} behalf.</p>` : ''}
         <div class="chips" style="margin-top:10px">${MODES.map(m => chip(f.mode === m[0], `data-set="mode" data-val="${m[0]}"`, m[2] + ' ' + m[1])).join('')}</div>
-        ${f.mode === 'upi' ? `<span class="flabel" style="margin-top:12px">UPI app</span><div class="chips">${[...new Set([...upiApps(), f.upiApp].filter(Boolean))].map(n => chip(f.upiApp === n, `data-upiapp="${esc(n)}"`, esc(n))).join('')}<button type="button" class="chip ghost" data-upiadd="1">+ Other</button></div>${myAccts.length ? '<span class="flabel" style="margin-top:12px">From account</span>' : ''}` : ''}
+        ${ACCT_MODES.includes(f.mode) && myAccts.length ? `<span class="flabel" style="margin-top:12px">From account</span><div class="chips">${myAccts.map(a => chip(f.accountId === a.id, `data-set="accountId" data-val="${esc(a.id)}"`, esc(acctLabel(a)))).join('')}</div>` : ''}
+        ${f.mode === 'debit_card' && acDc.length ? `<span class="flabel" style="margin-top:12px">Debit card</span><div class="chips">${acDc.map(c => chip(f.debitCardId === c.id, `data-set="debitCardId" data-val="${esc(c.id)}"`, '🏧 ' + esc(dcardLabel(c)))).join('')}</div>` : ''}
+        ${f.mode === 'upi' ? `<span class="flabel" style="margin-top:12px">UPI app</span><div class="chips">${[...new Set([...appsOf(acct), ...upiApps(), f.upiApp].filter(Boolean))].map(n => chip(f.upiApp === n, `data-upiapp="${esc(n)}"`, esc(n) + (acct && appsOf(acct).includes(n) ? ' <small>✓</small>' : ''))).join('')}<button type="button" class="chip ghost" data-upiadd="1">+ Other</button></div>
+          ${linkApp ? `<div class="chips" style="margin-top:6px"><button type="button" class="chip on" data-linkapp="1">＋ Link ${esc(linkApp)} to ${esc(acct.name)}</button></div><p class="hint" style="margin-top:2px">${esc(linkApp)} isn't linked to ${esc(acct.name)} yet. Link it so it's suggested next time.</p>` : acct && appsOf(acct).length ? `<p class="hint" style="margin-top:2px">✓ = linked to ${esc(acct.name)}</p>` : ''}` : ''}
         ${f.mode === 'credit_card' ? `<div class="chips" style="margin-top:8px">${myCards.length ? myCards.map(c => chip(f.cardId === c.id, `data-set="cardId" data-val="${esc(c.id)}"`, esc(c.name + (c.last4 ? ' ••' + c.last4 : '')))).join('') : `<span class="hint">No cards saved for ${esc(youL(f.paidBy))} yet. Add them under More → Credit cards to track bills.</span>`}</div>` : ''}
-        ${ACCT_MODES.includes(f.mode) && myAccts.length ? `<div class="chips" style="margin-top:${f.mode === 'upi' ? 0 : 8}px">${myAccts.map(a => chip(f.accountId === a.id, `data-set="accountId" data-val="${esc(a.id)}"`, esc(acctLabel(a)))).join('')}</div>` : ''}`)}
+`)}
 
+      <div id="fBest"></div>
       ${sec('split', 'Split', esc(splitName),
         `<div class="chips">
         ${chip(f.splitType === 'shared', 'data-set="splitType" data-val="shared"', `Shared ${sp}/${100 - sp}`)}
@@ -1059,16 +1337,26 @@ function openExpense(existing, preset, after) {
         ${frIds.length ? `<div class="seg" style="margin:10px 0"><button type="button" class="${f.frMode === 'equal' ? 'on' : ''}" data-set="frMode" data-val="equal">Equal with everyone</button><button type="button" class="${f.frMode === 'amounts' ? 'on' : ''}" data-set="frMode" data-val="amounts">Enter amounts</button></div>
           ${f.frMode === 'amounts' ? `<div class="two">${frIds.map(id => `<label class="f"><span>${esc(friendName(id))}</span><input class="in" data-frid="${esc(id)}" inputmode="decimal" placeholder="0" value="${esc(f.fr[id])}"></label>`).join('')}</div>` : ''}<p class="hint" id="fFrSum" style="margin-top:0"></p>` : ''}`)}
 
-      ${sec('when', 'Date & notes', esc(dayLabel(f.date)) + (f.notes ? ' · 📝' : ''),
-        `<div class="rowflex">${chip(f.date === t, 'data-set="date" data-val="' + t + '"', 'Today')}${chip(f.date === addDays(t, -1), 'data-set="date" data-val="' + addDays(t, -1) + '"', 'Yesterday')}<input class="in" type="date" id="fDate" value="${esc(f.date)}" max="2099-12-31"></div>
-        <input class="in" id="fNotes" placeholder="Notes (optional)" value="${esc(f.notes)}" maxlength="300" style="margin-top:10px">`)}
+      ${trips.length ? sec('trip', 'Trip / event', f.trip && tripOf(f.trip) ? esc(tripLabel(tripOf(f.trip))) : 'None',
+        `<div class="chips">${chip(!f.trip, 'data-set="trip" data-val=""', 'None')}${trips.map(t => chip(f.trip === t.id, `data-set="trip" data-val="${esc(t.id)}"`, esc(tripLabel(t)))).join('')}</div>`) : ''}
 
-      <div class="stick"><button class="btn primary block" data-save="1">${existing ? 'Save changes' : 'Save expense'}</button>
-      <div class="rowflex" style="margin-top:8px;flex-wrap:wrap">${existing ? '<button class="btn danger grow" data-del="1">Delete</button><button class="btn grow" data-dup="1">Duplicate</button><button class="btn grow" data-refund="1">Refund</button>' + (!locked && lentOf(existing) ? '<button class="btn grow" data-one="1">Settle this</button>' : '') : '<button class="btn grow" data-save="again">Save & add another</button>'}</div></div>`;
+      ${sec('when', 'Date & notes', esc(dayLabel(f.date)) + (f.notes ? ' · 📝' : '') + (f.receipt || rcSrc ? ' · 📎' : ''),
+        `<div class="rowflex">${chip(f.date === t, 'data-set="date" data-val="' + t + '"', 'Today')}${chip(f.date === addDays(t, -1), 'data-set="date" data-val="' + addDays(t, -1) + '"', 'Yesterday')}<input class="in" type="date" id="fDate" value="${esc(f.date)}" max="2099-12-31"></div>
+        <input class="in" id="fNotes" placeholder="Notes (optional)" value="${esc(f.notes)}" maxlength="300" style="margin-top:10px">
+        <div class="rowflex" style="margin-top:10px;align-items:center">${f.receipt || rcSrc ? `<img class="thumb" id="fRcImg" data-rcview="1" alt="Receipt photo" ${rcSrc ? `src="${rcSrc}"` : ''}><div class="grow"><small class="muted">${rcUp ? 'Uploading…' : 'Receipt attached · tap to view'}</small><br><button type="button" class="btn sm" data-rcdel="1" style="margin-top:6px">Remove</button></div>`
+          : `<label class="btn" style="cursor:pointer">📎 Attach receipt photo<input type="file" accept="image/*" id="fRc" hidden></label>`}</div>`)}
+
+      <div class="stick">${dupHit ? `<div class="alert" id="fDup" style="margin:0 0 8px"><span style="font-size:20px">⚠️</span><span class="grow"><b>Looks like a repeat</b><small>${esc(you(dupHit.paidBy))} · “${esc(dupHit.description)}” ${money(dupHit.amount)} · ${esc(dayLabel(dupHit.date))}${dupHit.createdBy ? ' · added by ' + esc(youL(dupHit.createdBy)) + ' ' + ago(dupHit.createdAt) : ''}</small></span></div>
+        <div class="rowflex" style="margin-bottom:8px"><button type="button" class="btn grow" data-dupopen="1">Open that one</button><button type="button" class="btn primary grow" data-dupok="1">Save anyway</button></div>` : ''}
+        <button class="btn ${dupHit ? '' : 'primary '}block" data-save="1">${existing ? 'Save changes' : 'Save expense'}</button>
+      <div class="rowflex" style="margin-top:8px;flex-wrap:wrap">${existing ? '<button class="btn danger grow" data-del="1">Delete</button><button class="btn grow" data-dup="1">Duplicate</button><button class="btn grow" data-refund="1">Refund</button>' + (!locked && lentOf(existing) ? '<button class="btn grow" data-one="1">Settle this</button>' : '') : f.noAgain ? '' : '<button class="btn grow" data-save="again">Save & add another</button>'}</div></div>`;
     upd();
+    if (f.receipt && !rcSrc) loadReceipt(f.receipt).then(src => { if (!src) return; rcSrc = src; const im = $('#fRcImg', body); if (im) im.src = src; }).catch(() => {});
   };
   const upd = () => {
     $('#fSum', body).innerHTML = summary();
+    const fb = $('#fBest', body), a1 = calc(f.amount), bc = !locked && a1 > 0 ? bestCard(f.paidBy, { amount: a1, platform: f.platform, category: f.mixed ? (f.parts.find(x => x.id) || {}).id : f.category }) : null;
+    if (fb) fb.innerHTML = bc && !(f.mode === 'credit_card' && f.cardId === bc.c.id) ? `<div class="alert info" style="margin:-4px 0 12px"><span style="font-size:20px">💡</span><span class="grow"><b>${esc(bc.c.name)} gives ${bc.pct}% here</b><small>≈ ${money(round2(a1 * bc.pct / 100))} back${f.mode === 'credit_card' && f.cardId ? ' · more than ' + esc((liveCards().find(c => c.id === f.cardId) || {}).name || 'this card') : ''}</small></span><button type="button" class="btn sm" data-bestcard="${esc(bc.c.id)}">Use it</button></div>` : '';
     $('#fCalc', body).textContent = /[+\-*x×\/]/.test(String(f.amount).slice(1)) ? `= ${money(calc(f.amount))}` : '';
     const cs = $('#fCatSum', body);
     if (cs) { const ca = catAlloc(), a0 = calc(f.amount), first = f.parts.find(p => p.id);
@@ -1095,8 +1383,9 @@ function openExpense(existing, preset, after) {
     collect();
     const a = round2(calc(f.amount));
     if (!(a > 0)) { toast('Enter an amount'); $('#fAmt', body).focus(); return; }
-    const dup = !existing && spends().find(e => e.date === f.date && e.amount === a && e.id !== f.id);
-    if (dup && !confirm(`${you(dup.paidBy)} already logged ${money(a)} for “${dup.description}” on ${niceDate(dup.date)}.\n\nAdd this one as well?`)) return;
+    if (rcUp) return toast('Photo still uploading — one moment');
+    const dup = !existing && !dupOk && findDup({ id: f.id, amount: a, date: f.date, platform: f.platform });
+    if (dup) { dupHit = dup; draw(); const d = $('#fDup', body); if (d) d.scrollIntoView({ block: 'center', behavior: 'smooth' }); return; }
     const fal = locked ? (existing.friends || []) : frAlloc(a).filter(p => p.amount > 0), ft = round2(fal.reduce((s, p) => s + p.amount, 0)), b0 = round2(a - ft);
     if (!locked && ft > a + 0.005) return toast('Friends\' parts add up to more than the total');
     if (!locked && f.splitType === 'custom' && ((f.cm === 'items' && num(f.own1) + num(f.own2) > b0 + 0.005) || (f.cm === 'amounts' && num(f.ex1) > b0 + 0.005))) return toast('The split adds up to more than the total');
@@ -1106,10 +1395,12 @@ function openExpense(existing, preset, after) {
     if (f.mixed && ca.left < -0.005) return toast('Category amounts add up to more than the total');
     const cal = ca.list.filter(c => c.amount > 0);
     const category = (cal.length > 1 ? cal.slice().sort((x, y) => y.amount - x.amount)[0].id : f.mixed ? (f.parts.find(p => p.id) || {}).id : f.category) || 'other';
-    const row = { id: f.id, type: 'expense', date: f.date, amount: a, description: f.description.trim() || cat(category).name, category, paidBy: f.paidBy, mode: f.mode, cardId: f.cardId, accountId: f.accountId || '', upiApp: f.mode === 'upi' ? f.upiApp || '' : '', splitType: f.splitType, ...shares(b0), friendsShare: ft, friends: fal.map(p => ({ id: p.id, amount: p.amount, settled: ((existing && existing.friends || []).find(x => x.id === p.id) || {}).settled || '', paid: ((existing && existing.friends || []).find(x => x.id === p.id) || {}).paid || 0 })), notes: f.notes.trim(), platform: f.platform, device: f.platform ? f.device : '', cats: cal.length > 1 ? cal : [], splitInfo: f.splitType !== 'custom' ? {} : f.cm === 'items' ? { cm: 'items', own1: num(f.own1), own2: num(f.own2) } : f.cm === 'pct' ? { cm: 'pct', pct: f.payerPct } : { cm: 'amounts' }, recurringId: f.recurringId || '', settledBy: f.settledBy || '', createdBy: existing ? existing.createdBy : me, createdAt: f.createdAt || Date.now(), deleted: false };
+    const row = { id: f.id, type: 'expense', date: f.date, amount: a, description: f.description.trim() || cat(category).name, category, paidBy: f.paidBy, mode: f.mode, cardId: f.cardId, accountId: f.accountId || '', upiApp: f.mode === 'upi' ? f.upiApp || '' : '', debitCardId: f.mode === 'debit_card' ? f.debitCardId || '' : '', trip: f.trip || '', receipt: f.receipt || '', splitType: f.splitType, ...shares(b0), friendsShare: ft, friends: fal.map(p => ({ id: p.id, amount: p.amount, settled: ((existing && existing.friends || []).find(x => x.id === p.id) || {}).settled || '', paid: ((existing && existing.friends || []).find(x => x.id === p.id) || {}).paid || 0 })), notes: f.notes.trim(), platform: f.platform, device: f.platform ? f.device : '', cats: cal.length > 1 ? cal : [], splitInfo: f.splitType !== 'custom' ? {} : f.cm === 'items' ? { cm: 'items', own1: num(f.own1), own2: num(f.own2) } : f.cm === 'pct' ? { cm: 'pct', pct: f.payerPct } : { cm: 'amounts' }, recurringId: f.recurringId || '', settledBy: f.settledBy || '', createdBy: existing ? existing.createdBy : me, createdAt: f.createdAt || Date.now(), deleted: false };
     if (locked) Object.assign(row, { amount: existing.amount, paidBy: existing.paidBy, splitType: existing.splitType, share1: existing.share1, share2: existing.share2, friendsShare: existing.friendsShare || 0, friends: existing.friends || [], splitInfo: existing.splitInfo || {} });
     prefs.lastMode = f.paidBy === me ? f.mode : prefs.lastMode; prefs.lastSplit = f.splitType === 'custom' ? 'shared' : f.splitType; if (f.cardId && f.paidBy === me) prefs.lastCard = f.cardId; if (f.accountId && f.paidBy === me) prefs.lastAcct = f.accountId; if (f.upiApp && f.paidBy === me) prefs.lastUpi = f.upiApp; savePrefs();
     mutate('Expenses', row);
+    if (existing && existing.receipt && existing.receipt !== row.receipt) dropReceipt(existing.receipt);
+    rcNew.forEach(id => { if (id !== row.receipt) dropReceipt(id); });
     let msg = existing ? 'Updated' : `Saved ${money(a)}`;
     if (!existing && monthOf(row.date) === monthOf(today())) {
       const st = stats(monthOf(row.date)), bud = S.budgets;
@@ -1117,12 +1408,20 @@ function openExpense(existing, preset, after) {
       chk(st.byCat[category] || 0, Number(bud[category]), cat(category).name); chk(st.total, Number(bud._total), 'Monthly');
     }
     toast(msg);
-    if (again) openExpense(null, after ? preset : { date: f.date, paidBy: f.paidBy }, after); else if (after) after(); else closeSheet();
+    if (again) openExpense(null, after ? preset : { date: f.date, paidBy: f.paidBy }, after); else if (after) after(f.id); else closeSheet();
   };
   body.onclick = ev => {
     const hit = sel => ev.target.closest(sel);
-    const ua = hit('[data-upiapp]'); if (ua) { collect(); touched.add('upiApp'); f.upiApp = f.upiApp === ua.dataset.upiapp ? '' : ua.dataset.upiapp; return draw(); }
+    const ua = hit('[data-upiapp]'); if (ua) { collect(); touched.add('upiApp'); f.upiApp = f.upiApp === ua.dataset.upiapp ? '' : ua.dataset.upiapp;
+      if (f.upiApp && !touched.has('accountId')) { const on = liveAccts().filter(a => a.owner === f.paidBy && appsOf(a).includes(f.upiApp)); if (on.length === 1) f.accountId = on[0].id; }   // the app tells us the account when only one is on it
+      draw(); const l = $('[data-linkapp]', body); if (l) l.scrollIntoView({ block: 'center', behavior: 'smooth' }); return; }
+    if (hit('[data-linkapp]')) { collect(); const a = liveAccts().find(x => x.id === f.accountId); if (a && f.upiApp) { mutate('Accounts', { ...a, upiApp: [...appsOf(a), f.upiApp].join(', ') }); toast(f.upiApp + ' linked to ' + a.name); } return draw(); }
     if (hit('[data-upiadd]')) { const n = (prompt('UPI app name') || '').trim().slice(0, 20); if (!n) return; collect(); if (!upiApps().includes(n)) setSetting('upiApps', [...(state.settings.upiApps || []), n]); f.upiApp = n; touched.add('upiApp'); return draw(); }
+    if (hit('[data-dupok]')) { dupOk = true; return save(false); }
+    if (hit('[data-dupopen]')) { const d = dupHit; closeSheet(); return d && openExpense(d); }
+    const bcb = hit('[data-bestcard]'); if (bcb) { collect(); f.mode = 'credit_card'; f.cardId = bcb.dataset.bestcard; f.accountId = ''; touched.add('mode'); open.add('pay'); return draw(); }
+    if (hit('[data-rcview]')) { if (rcSrc) viewReceipt(rcSrc); return; }
+    if (hit('[data-rcdel]')) { if (rcUp) return; collect(); if (rcNew.has(f.receipt)) { dropReceipt(f.receipt); rcNew.delete(f.receipt); } f.receipt = ''; rcSrc = ''; return draw(); }
     if (hit('[data-toincome]')) { collect(); return openIncome(null, { amount: f.amount, date: f.date }); }
     if (hit('[data-totransfer]')) { collect(); return openTransfer(null, { amount: f.amount, date: f.date }); }
     if (hit('[data-refund]')) return openRefund(existing);
@@ -1130,7 +1429,7 @@ function openExpense(existing, preset, after) {
     const cl = hit('[data-close]'); if (cl) { collect(); open.delete(cl.dataset.close); return draw(); }
     const s = hit('[data-set]');
     if (s) { if (locked && /paidBy|splitType/.test(s.dataset.set)) return toast('Settled — undo the settlement to change this'); collect(); touched.add(s.dataset.set); const was = shares(), wasFr = frAlloc(); f[s.dataset.set] = s.dataset.val;
-      if (s.dataset.set === 'accountId') { const a = liveAccts().find(x => x.id === f.accountId); if (a && a.upiApp && f.mode === 'upi') f.upiApp = a.upiApp; }
+      if (s.dataset.set === 'accountId') { const a = liveAccts().find(x => x.id === f.accountId), ap = appsOf(a); if (ap.length && f.mode === 'upi' && !ap.includes(f.upiApp)) f.upiApp = ap[0]; if (f.mode === 'debit_card' && dcardsOf(a).length > 1) setTimeout(() => { const d = $('[data-set=debitCardId]', body); d && d.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, 0); }
       if (s.dataset.set === 'paidBy' && !existing && !touched.has('mode')) {      // entering for the other person: start from how they usually pay
         const last = f.paidBy === me ? null : spends().filter(e => e.paidBy === f.paidBy).sort((x, y) => y.createdAt - x.createdAt)[0];
         if (last) { f.mode = last.mode; f.cardId = last.cardId; f.accountId = last.accountId || ''; f.upiApp = last.upiApp || ''; } else if (f.paidBy === me) { f.mode = prefs.lastMode || 'upi'; f.cardId = ''; }
@@ -1140,6 +1439,10 @@ function openExpense(existing, preset, after) {
       return draw(); }
     if (hit('[data-plus]')) { const i = $('#fAmt', body); if (i.value && !/[+\-*\/]$/.test(i.value)) i.value += '+'; f.amount = i.value; i.focus(); return upd(); }
     if (hit('[data-allcats]')) { collect(); allCats = !allCats; return draw(); }
+    if (hit('[data-newcat]')) { collect(); newCat = !newCat; draw(); if (newCat) $('#fNcN', body).focus(); return; }
+    if (hit('[data-ncadd]')) { const nm = $('#fNcN', body).value.trim(); if (!nm) return $('#fNcN', body).focus(); const em = $('#fNcE', body).value; collect(); const id = addCategory(nm, em);
+      if (f.mixed) { const p = f.parts.find(x => !x.id); if (p) p.id = id; else f.parts.push({ id, amount: '' }); } else { f.category = id; touched.add('category'); }
+      newCat = false; toast(cat(id).emoji + ' ' + cat(id).name + ' added'); return draw(); }
     if (hit('[data-mixed]')) { collect(); f.mixed = !f.mixed; if (f.mixed) f.parts = [{ id: f.category || '', amount: '' }, { id: '', amount: '' }]; else f.category = (f.parts.find(p => p.id) || {}).id || f.category; return draw(); }
     if (hit('[data-madd]')) { collect(); f.parts.push({ id: '', amount: '' }); return draw(); }
     const md = hit('[data-mdel]'); if (md) { collect(); f.parts.splice(Number(md.dataset.mdel), 1); if (!f.parts.length) f.parts.push({ id: '', amount: '' }); return draw(); }
@@ -1166,6 +1469,14 @@ function openExpense(existing, preset, after) {
   };
   body.onchange = ev => {
     const t = ev.target;
+    if (t.id === 'fRc' && t.files && t.files[0]) {
+      const file = t.files[0]; collect();
+      if (!cfg.demo && !navigator.onLine) return toast('Connect to the internet to attach a photo');
+      rcUp = shrinkImage(file).then(src => { rcSrc = src; draw(); return uploadReceipt(src, f.id); })
+        .then(id => { if (f.receipt && rcNew.has(f.receipt)) dropReceipt(f.receipt); f.receipt = id; rcNew.add(id); rcUp = null; draw(); toast('Receipt attached'); })
+        .catch(e => { rcUp = null; rcSrc = f.receipt ? rcSrc : ''; draw(); toast('Could not attach the photo: ' + e.message); });
+      return draw();
+    }
     if (t.id === 'fDate') { collect(); draw(); }
     if (t.dataset.mcat) { collect(); upd(); }
     if (t.id === 'fDesc') {       // learn from history, then from keywords
@@ -1181,6 +1492,7 @@ function openExpense(existing, preset, after) {
   body.onkeydown = ev => {
     if (ev.key !== 'Enter' || ev.target.tagName !== 'INPUT') return;
     ev.preventDefault();
+    if (ev.target.id === 'fNcN' || ev.target.id === 'fNcE') { $('[data-ncadd]', body).click(); return; }
     if (ev.target.id === 'fPlatQ') { const first = $('#fPlatRes [data-plat], #fPlatRes [data-platnew]', body); if (first) first.click(); return; }
     save(false);
   };
@@ -1279,6 +1591,110 @@ function openFriend(id) {
 }
 
 /* an existing settlement: what it covered, and undo */
+
+/* ───────────────────────── trips & events ───────────────────────── */
+function openTripEdit(t) {
+  const f = t ? { ...t } : { id: 't' + uid(), name: '', emoji: '🧳', start: today(), end: today() };
+  const EM = ['🧳', '🏖️', '🏔️', '✈️', '🎉', '💍', '🪔', '🏠', '🎂', '⛺'];
+  const body = openSheet(t ? 'Edit trip or event' : 'Add trip or event', '');
+  const draw = () => {
+    const n = spends().filter(e => !e.trip && e.date >= f.start && e.date <= f.end).length;
+    body.innerHTML = `<label class="f"><span>Name</span><input class="in" id="tNm" value="${esc(f.name)}" placeholder="e.g. Goa trip, Diwali, House warming" maxlength="40"></label>
+      <div class="fsec"><span class="flabel">Icon</span><div class="chips">${EM.map(x => chip(f.emoji === x, `data-em="${x}"`, x)).join('')}</div></div>
+      <div class="two"><label class="f"><span>From</span><input class="in" type="date" id="tS" value="${esc(f.start)}"></label><label class="f"><span>To</span><input class="in" type="date" id="tE" value="${esc(f.end)}"></label></div>
+      <p class="hint" style="margin:-6px 0 14px">New expenses dated in this range are tagged with it automatically (you can untag any of them).</p>
+      ${n ? `<label class="rowflex" style="gap:10px;margin-bottom:14px"><input type="checkbox" id="tTag" checked> <span>Also tag the ${n} untagged expense${n > 1 ? 's' : ''} already in these dates</span></label>` : ''}
+      <button class="btn primary block" data-save="1">Save</button>${t ? `<div class="rowflex" style="margin-top:8px"><button class="btn grow" data-arch="1">${t.archived ? 'Move back to active' : 'Mark finished'}</button><button class="btn danger grow" data-del="1">Delete</button></div>` : ''}`;
+  };
+  const collect = () => { f.name = $('#tNm', body).value; f.start = $('#tS', body).value || f.start; f.end = $('#tE', body).value || f.end; if (f.end < f.start) f.end = f.start; };
+  body.onclick = ev => {
+    const em = ev.target.closest('[data-em]'); if (em) { collect(); f.emoji = em.dataset.em; return draw(); }
+    if (ev.target.closest('[data-save]')) { collect(); if (!f.name.trim()) return toast('Give it a name');
+      const tag = $('#tTag', body) && $('#tTag', body).checked;
+      setSetting('trips', [...tripsAll().filter(x => x.id !== f.id), { id: f.id, name: f.name.trim().slice(0, 40), emoji: f.emoji, start: f.start, end: f.end, archived: !!f.archived }]);
+      if (tag) spends().filter(e => !e.trip && e.date >= f.start && e.date <= f.end).forEach(e => mutate('Expenses', { ...e, trip: f.id }, true));
+      closeSheet(); render(); return toast('Saved'); }
+    if (ev.target.closest('[data-arch]')) { setSetting('trips', tripsAll().map(x => x.id === t.id ? { ...x, archived: !x.archived } : x)); closeSheet(); return render(); }
+    if (ev.target.closest('[data-del]')) { const l = live().filter(e => e.trip === t.id); if (!confirm(`Delete “${t.name}”?${l.length ? ` Its ${l.length} expense${l.length > 1 ? 's stay' : ' stays'}, just untagged.` : ''}`)) return;
+      l.forEach(e => mutate('Expenses', { ...e, trip: '' }, true)); setSetting('trips', tripsAll().filter(x => x.id !== t.id)); closeSheet(); render(); }
+  };
+  draw();
+}
+function tripReport(t) {
+  const l = spends().filter(e => e.trip === t.id), tot = round2(l.reduce((x, e) => x + spendOf(e), 0));
+  const paid = { u1: 0, u2: 0 }, sh = { u1: 0, u2: 0 }, byCat = {};
+  l.forEach(e => { paid[e.paidBy] = round2((paid[e.paidBy] || 0) + spendOf(e)); sh.u1 = round2(sh.u1 + e.share1); sh.u2 = round2(sh.u2 + e.share2); (e.cats && e.cats.length > 1 ? e.cats : [{ id: e.category, amount: spendOf(e) }]).forEach(c => (byCat[c.id] = round2((byCat[c.id] || 0) + c.amount))); });
+  const fr = round2(l.reduce((x, e) => x + (e.friendsShare || 0), 0));
+  return { l, tot, paid, sh, byCat, fr, open: openItems().filter(e => e.trip === t.id) };
+}
+function openTrip(id) {
+  const t = tripOf(id); if (!t) return;
+  const r = tripReport(t), me = meId(), ot = otherId(), net = round2(r.open.reduce((x, e) => x + lentOf(e), 0));
+  const days = t.start && t.end ? diffDays(t.end, t.start) + 1 : 0;
+  const body = openSheet(tripLabel(t), `
+    <div class="card hero" style="margin-bottom:10px"><h3>${t.start ? esc(niceDate(t.start)) + (t.end !== t.start ? ' – ' + esc(niceDate(t.end)) : '') : 'Total'}</h3><div class="big">${money(r.tot)}</div><div class="sub">${r.l.length} expense${r.l.length === 1 ? '' : 's'}${days > 1 ? ' · ' + money0(r.tot / days) + ' a day' : ''}${r.fr ? ' · friends paid their ' + money0(r.fr) : ''}</div></div>
+    <div class="card"><h3>Who paid, who owes</h3><div class="kpis"><div class="kpi"><small>${esc(you('u1'))} paid</small><b>${money0(r.paid.u1)}</b><small class="muted">share ${money0(r.sh.u1)}</small></div><div class="kpi"><small>${esc(you('u2'))} paid</small><b>${money0(r.paid.u2)}</b><small class="muted">share ${money0(r.sh.u2)}</small></div></div>
+      <p class="hint">${!r.open.length ? (r.l.length ? 'Everything on this trip is settled ✓' : 'No expenses tagged yet.') : Math.abs(net) < 0.005 ? 'Open items cancel out.' : net > 0 ? `${esc(uname(ot))} owes you <b>${money(net)}</b> for this trip` : `You owe ${esc(uname(ot))} <b>${money(-net)}</b> for this trip`}</p>
+      ${r.open.length ? '<button class="btn primary block" data-settle="1">Settle this trip</button>' : ''}</div>
+    ${r.l.length ? `<div class="card"><h3>By category</h3><div class="list">${Object.entries(r.byCat).sort((a, b) => b[1] - a[1]).map(([c, v]) => `<div class="row"><span class="ico">${esc(cat(c).emoji)}</span><span class="rmain"><b>${esc(cat(c).name)}</b></span><span class="ramt"><b>${money0(v)}</b></span></div>`).join('')}</div></div>
+    <div class="card"><h3>Expenses</h3><div class="list">${r.l.sort((a, b) => b.date.localeCompare(a.date)).map(expRow).join('')}</div></div>` : ''}
+    <div class="rowflex"><button class="btn grow" data-share="1">Share summary</button><button class="btn grow" data-edit="1">Edit</button></div>`);
+  body.onclick = ev => {
+    const row = ev.target.closest('[data-act=edit]'); if (row) { const e = state.expenses.find(x => x.id === row.dataset.id); return e && openExpense(e, null, () => openTrip(id)); }
+    if (ev.target.closest('[data-settle]')) return openSettle(r.open.map(e => e.id));
+    if (ev.target.closest('[data-edit]')) return openTripEdit(t);
+    if (ev.target.closest('[data-share]')) return share([`${tripLabel(t)}${t.start ? ' (' + niceDate(t.start) + (t.end !== t.start ? ' – ' + niceDate(t.end) : '') + ')' : ''}`, `Total: ${money(r.tot)}`, '',
+      ...Object.entries(r.byCat).sort((a, b) => b[1] - a[1]).map(([c, v]) => `• ${cat(c).name}: ${money(v)}`), '',
+      `${uname('u1')} paid ${money(r.paid.u1)}, share ${money(r.sh.u1)}`, `${uname('u2')} paid ${money(r.paid.u2)}, share ${money(r.sh.u2)}`,
+      r.open.length && Math.abs(net) >= 0.005 ? (net > 0 ? `${uname(ot)} owes ${uname(me)} ${money(net)}` : `${uname(me)} owes ${uname(ot)} ${money(-net)}`) : 'All settled'].join('\n'), 'Summary copied');
+  };
+}
+
+/* ───────────────────────── savings goals ───────────────────────── */
+function openGoal(g) {
+  const f = g ? { ...g } : { id: 'g' + uid(), name: '', emoji: '🐷', target: '', by: '', who: 'both', adds: [] };
+  const EM = ['🐷', '🏖️', '🏠', '🚗', '💍', '🎓', '🛟', '📱', '👶', '🎁'];
+  const body = openSheet(g ? 'Edit goal' : 'Add a goal', '');
+  const draw = () => {
+    body.innerHTML = `<label class="f"><span>What for</span><input class="in" id="gNm" value="${esc(f.name)}" placeholder="e.g. Emergency fund, Bali trip" maxlength="40"></label>
+      <div class="fsec"><span class="flabel">Icon</span><div class="chips">${EM.map(x => chip(f.emoji === x, `data-em="${x}"`, x)).join('')}</div></div>
+      <div class="two"><label class="f"><span>Target</span><input class="in" id="gT" inputmode="decimal" value="${esc(f.target)}" placeholder="0"></label><label class="f"><span>By (optional)</span><input class="in" type="date" id="gBy" value="${esc(f.by)}"></label></div>
+      <div class="fsec"><span class="flabel">Whose goal</span><div class="seg">${[['both', 'Together'], ['u1', you('u1')], ['u2', you('u2')]].map(([k, l]) => `<button type="button" class="${f.who === k ? 'on' : ''}" data-who="${k}">${esc(l)}</button>`).join('')}</div></div>
+      ${g ? '' : `<label class="f"><span>Already saved (optional)</span><input class="in" id="gS0" inputmode="decimal" placeholder="0"></label>`}
+      <button class="btn primary block" data-save="1">Save goal</button>${g ? `<div class="rowflex" style="margin-top:8px"><button class="btn grow" data-done="1">${g.done ? 'Move back to active' : 'Mark finished'}</button><button class="btn danger grow" data-del="1">Delete</button></div>` : ''}`;
+  };
+  const collect = () => { f.name = $('#gNm', body).value; f.target = $('#gT', body).value; f.by = $('#gBy', body).value; };
+  body.onclick = ev => {
+    const em = ev.target.closest('[data-em]'); if (em) { collect(); f.emoji = em.dataset.em; return draw(); }
+    const w = ev.target.closest('[data-who]'); if (w) { collect(); f.who = w.dataset.who; return draw(); }
+    if (ev.target.closest('[data-save]')) { collect(); const tg = round2(calc(f.target)); if (!f.name.trim()) return toast('Give the goal a name'); if (!(tg > 0)) return toast('Enter a target amount');
+      const s0 = !g && $('#gS0', body) ? round2(calc($('#gS0', body).value)) : 0;
+      const adds = s0 > 0 ? [{ date: today(), amount: s0, by: meId(), note: 'Already saved' }] : f.adds || [];
+      setSetting('goals', [...goalsAll().filter(x => x.id !== f.id), { id: f.id, name: f.name.trim().slice(0, 40), emoji: f.emoji, target: tg, by: f.by || '', who: f.who, adds, done: !!f.done }]); closeSheet(); render(); return toast('Goal saved'); }
+    if (ev.target.closest('[data-done]')) { setSetting('goals', goalsAll().map(x => x.id === g.id ? { ...x, done: !x.done } : x)); closeSheet(); return render(); }
+    if (ev.target.closest('[data-del]') && confirm(`Delete the goal “${g.name}” and its history?`)) { setSetting('goals', goalsAll().filter(x => x.id !== g.id)); closeSheet(); render(); }
+  };
+  draw();
+}
+function goalMove(id, sign) {
+  const g = goalsAll().find(x => x.id === id); if (!g) return;
+  const body = openSheet(sign > 0 ? `Add to ${g.name}` : `Take out of ${g.name}`, `<div class="amount"><span>${esc(S.cur)}</span><input id="gmA" inputmode="decimal" placeholder="0" autocomplete="off"></div>
+    <div class="fsec"><span class="flabel">By</span><div class="seg">${['u1', 'u2'].map(u => `<button type="button" class="${u === meId() ? 'on' : ''}" data-by="${u}">${esc(you(u))}</button>`).join('')}</div></div>
+    <input class="in" id="gmN" placeholder="Note (optional), e.g. moved to FD" maxlength="60">
+    <button class="btn primary block" data-ok="1" style="margin-top:12px">${sign > 0 ? 'Add' : 'Take out'}</button>`);
+  let by = meId();
+  body.onclick = ev => {
+    const b = ev.target.closest('[data-by]'); if (b) { by = b.dataset.by; $$('[data-by]', body).forEach(x => x.classList.toggle('on', x === b)); return; }
+    if (!ev.target.closest('[data-ok]')) return;
+    const a = round2(calc($('#gmA', body).value)); if (!(a > 0)) return toast('Enter an amount');
+    if (sign < 0 && a > goalSaved(g) + 0.005) return toast(`Only ${money(goalSaved(g))} saved so far`);
+    const adds = [...(g.adds || []), { date: today(), amount: sign * a, by, note: $('#gmN', body).value.trim() }];
+    setSetting('goals', goalsAll().map(x => x.id === id ? { ...x, adds } : x)); closeSheet(); render();
+    const sv = adds.reduce((x, y) => x + y.amount, 0); toast(sign > 0 && sv >= g.target && sv - a < g.target ? `🎉 ${g.name} reached!` : sign > 0 ? `Added ${money(a)}` : `Took out ${money(a)}`);
+  };
+  setTimeout(() => $('#gmA', body).focus(), 60);
+}
+
 function openSettlement(s) {
   const covered = state.expenses.filter(e => e.settledBy === s.id && !e.deleted).sort((a, b) => b.date.localeCompare(a.date));
   const body = openSheet('Settlement', `
@@ -1297,21 +1713,35 @@ function openSettlement(s) {
 }
 
 function openCard(c) {
-  const f = c ? { ...c } : { id: uid(), owner: meId(), name: '', last4: '', statementDay: 1, dueDay: 20, limit: '' };
+  const f = c ? { ...c, rw: { base: (c.rewards || {}).base || '', rules: rewardRules(c).map(r => ({ ...r })) } } : { id: uid(), owner: meId(), name: '', last4: '', statementDay: 1, dueDay: 20, limit: '', rw: { base: '', rules: [] } };
   const body = openSheet(c ? 'Edit card' : 'Add credit card', '');
   const days = sel => Array.from({ length: 31 }, (_, i) => `<option ${i + 1 === sel ? 'selected' : ''}>${i + 1}</option>`).join('');
+  const ruleName = k => k.startsWith('plat:') ? k.slice(5) : (c2 => c2.emoji + ' ' + c2.name)(cat(k.slice(4)));
+  const opts = () => `<option value="">On…</option><optgroup label="Platform">${[...new Set([...S.platforms, ...spends().map(e => e.platform).filter(Boolean)])].map(n => `<option value="plat:${esc(n)}">${esc(n)}</option>`).join('')}</optgroup><optgroup label="Category">${S.activeCats.map(x => `<option value="cat:${esc(x.id)}">${esc(x.emoji + ' ' + x.name)}</option>`).join('')}</optgroup>`;
   const draw = () => {
     body.innerHTML = `<label class="f"><span>Card name</span><input class="in" id="cName" value="${esc(f.name)}" placeholder="e.g. HDFC Regalia" maxlength="30"></label>
       <div class="fsec"><span class="flabel">Whose card</span><div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.owner === id ? 'on' : ''}" data-own="${id}">${esc(you(id))}</button>`).join('')}</div></div>
       <div class="grid2" style="grid-template-columns:1fr 1fr;margin-bottom:0"><label class="f"><span>Bill generated on</span><select class="in" id="cStmt">${days(f.statementDay)}</select></label><label class="f"><span>Payment due on</span><select class="in" id="cDue">${days(f.dueDay)}</select></label></div>
       <p class="hint" style="margin:-6px 0 14px">Day of the month, as shown on your statement. Do not enter the full card number anywhere.</p>
       <div class="grid2" style="grid-template-columns:1fr 1fr;margin-bottom:0"><label class="f"><span>Last 4 digits (optional)</span><input class="in" id="cL4" inputmode="numeric" maxlength="4" value="${esc(f.last4)}"></label><label class="f"><span>Credit limit (optional)</span><input class="in" id="cLim" inputmode="decimal" value="${esc(f.limit || '')}"></label></div>
+      <p class="hint" style="margin:-6px 0 14px">Last 4 digits let forwarded SMS be matched to this card.</p>
+      <div class="fsec"><span class="flabel">Cashback / rewards</span>
+        <div class="catrow" style="grid-template-columns:1fr 90px"><span style="align-self:center">On everything</span><input class="in" id="cBase" inputmode="decimal" placeholder="%" value="${esc(f.rw.base)}" aria-label="Base reward percent"></div>
+        ${f.rw.rules.map((r, i) => `<div class="catrow" style="grid-template-columns:1fr 90px 40px"><span style="align-self:center">${esc(ruleName(r.k))}</span><input class="in" data-rp="${i}" inputmode="decimal" value="${esc(r.pct)}" aria-label="Percent"><button type="button" class="x" data-rdel="${i}" aria-label="Remove">✕</button></div>`).join('')}
+        <div class="catrow" style="grid-template-columns:1fr 90px 40px"><select class="in" id="cRk">${opts()}</select><input class="in" id="cRp" inputmode="decimal" placeholder="%" aria-label="Percent"><button type="button" class="btn" data-radd="1" style="padding:0">＋</button></div>
+        <p class="hint" style="margin-top:0">e.g. 5% on Amazon, 10% on Swiggy, 1% on everything else. Used to estimate rewards and to suggest the best card when you add an expense.</p></div>
       <button class="btn primary block" data-save="1">Save card</button>${c ? '<button class="btn danger block" data-del="1" style="margin-top:8px">Remove card</button>' : ''}`;
   };
-  const collect = () => { f.name = $('#cName', body).value; f.statementDay = Number($('#cStmt', body).value); f.dueDay = Number($('#cDue', body).value); f.last4 = $('#cL4', body).value.replace(/\D/g, '').slice(0, 4); f.limit = num($('#cLim', body).value); };
+  const collect = () => { f.name = $('#cName', body).value; f.statementDay = Number($('#cStmt', body).value); f.dueDay = Number($('#cDue', body).value); f.last4 = $('#cL4', body).value.replace(/\D/g, '').slice(0, 4); f.limit = num($('#cLim', body).value);
+    f.rw.base = $('#cBase', body).value; $$('[data-rp]', body).forEach(i => { const r = f.rw.rules[i.dataset.rp]; if (r) r.pct = i.value; }); };
   body.onclick = ev => {
     const o = ev.target.closest('[data-own]'); if (o) { collect(); f.owner = o.dataset.own; draw(); return; }
-    if (ev.target.closest('[data-save]')) { collect(); if (!f.name.trim()) return toast('Give the card a name'); mutate('Cards', { id: f.id, owner: f.owner, name: f.name.trim(), last4: f.last4, statementDay: f.statementDay, dueDay: f.dueDay, limit: f.limit, deleted: false }); closeSheet(); toast('Card saved'); }
+    if (ev.target.closest('[data-radd]')) { collect(); const k = $('#cRk', body).value, pct = num($('#cRp', body).value); if (!k) return toast('Choose a platform or category'); if (!(pct > 0)) return toast('Enter the % back');
+      f.rw.rules = f.rw.rules.filter(r => r.k !== k).concat([{ k, pct }]); return draw(); }
+    const rd = ev.target.closest('[data-rdel]'); if (rd) { collect(); f.rw.rules.splice(Number(rd.dataset.rdel), 1); return draw(); }
+    if (ev.target.closest('[data-save]')) { collect(); if (!f.name.trim()) return toast('Give the card a name');
+      const rewards = { base: Math.max(0, Math.min(100, num(f.rw.base))) || 0, rules: f.rw.rules.map(r => ({ k: r.k, pct: Math.max(0, Math.min(100, num(r.pct))) })).filter(r => r.pct > 0) };
+      mutate('Cards', { id: f.id, owner: f.owner, name: f.name.trim(), last4: f.last4, statementDay: f.statementDay, dueDay: f.dueDay, limit: f.limit, rewards, deleted: false }); closeSheet(); toast('Card saved'); }
     if (ev.target.closest('[data-del]') && confirm('Remove this card? Past expenses stay.')) { mutate('Cards', { ...c, deleted: true }); closeSheet(); }
   };
   draw();
@@ -1336,7 +1766,7 @@ function openPart() {
   draw();
 }
 
-function openTransfer(existing, preset) {
+function openTransfer(existing, preset, after) {
   const me = meId();
   const f = existing ? { ...existing } : { id: uid(), amount: '', category: 'card_bill', paidBy: me, accountId: '', toAccountId: '', cardId: '', date: today(), notes: '', ...preset };
   const body = openSheet(existing ? 'Edit transfer' : 'Add transfer', '');
@@ -1363,7 +1793,7 @@ function openTransfer(existing, preset) {
     const description = k === 'card_bill' ? `${card.name} bill` : k === 'own' ? `${from ? from.name : 'Account'} → ${to.name}` : 'Cash withdrawal';
     mutate('Expenses', { id: f.id, type: 'transfer', date: f.date, amount: a, description, category: k, paidBy: f.paidBy, mode: '', cardId: k === 'card_bill' ? card.id : '', accountId: f.accountId || '', toAccountId: k === 'own' ? to.id : '', splitType: '', share1: 0, share2: 0, notes: f.notes.trim(), recurringId: '', settledBy: '', createdBy: existing ? existing.createdBy : me, createdAt: f.createdAt || Date.now(), deleted: false }, true);
     if (k === 'card_bill' && !existing) { const i = cardInfo(card); if (i.billed > 0 && !i.paid) mutate('BillPayments', { id: card.id + '_' + i.stmt, cardId: card.id, cycle: i.stmt, paidOn: today(), paidBy: f.paidBy, deleted: false }, true); }
-    closeSheet(); render(); toast(existing ? 'Updated' : `Transfer of ${money(a)} saved`);
+    if (after) after(f.id); closeSheet(); render(); toast(existing ? 'Updated' : `Transfer of ${money(a)} saved`);
   };
   body.onclick = ev => {
     const s = ev.target.closest('[data-set]');
@@ -1639,7 +2069,7 @@ function openIncome(existing, preset, after) {
     if (!(a > 0)) { toast('Enter an amount'); return $('#iAmt', body).focus(); }
     mutate('Expenses', { id: f.id, type: 'income', date: f.date, amount: a, description: f.description.trim() || inKind(f.category)[1], category: f.category, paidBy: f.paidBy, mode: '', cardId: '', accountId: f.accountId || '', splitType: '', share1: 0, share2: 0, notes: f.notes.trim(), recurringId: '', settledBy: '', createdBy: existing ? existing.createdBy : me, createdAt: f.createdAt || Date.now(), deleted: false });
     if (f.paidBy === me) { prefs.lastInAcct = f.accountId; savePrefs(); }
-    toast(existing ? 'Updated' : `Added ${money(a)} money in`); if (after) after(); else closeSheet();
+    toast(existing ? 'Updated' : `Added ${money(a)} money in`); if (after) after(f.id); else closeSheet();
   };
   body.onclick = ev => {
     const s = ev.target.closest('[data-set]');
@@ -1654,6 +2084,35 @@ function openIncome(existing, preset, after) {
   if (!existing) setTimeout(() => { const i = $('#iAmt', body); i && i.focus(); }, 60);
 }
 
+
+function openSmsSetup(key) {
+  const url = `${cfg.api}?sms=${encodeURIComponent(key)}`;
+  const body = openSheet('Forward bank SMS', `
+    <p class="hint" style="margin:0 0 12px">Your phone sends each bank SMS to your sheet. Payments then wait in the SMS inbox, already filled in. Keep this link private: anyone with it can add messages to your inbox.</p>
+    <div class="card"><h3>Your forwarding link</h3><input class="in" readonly value="${esc(url)}" style="font-size:12px"><div class="rowflex" style="margin-top:8px"><button class="btn grow" data-copy="${esc(url)}">Copy link</button><button class="btn grow" data-test="1">Send a test</button></div></div>
+    <div class="card"><h3>Android · MacroDroid (free)</h3><ol class="steps">
+      <li>Install <b>MacroDroid</b> from the Play Store and allow it to read SMS.</li>
+      <li>Add macro → Trigger <b>SMS Received</b> → From <b>Any number</b> → Content <b>Any</b>. (Optional: only messages containing <i>debited</i>, <i>spent</i>, <i>credited</i> or <i>sent</i>.)</li>
+      <li>Action <b>HTTP Request</b> → Method <b>POST</b> → URL: paste the link above.</li>
+      <li>Body / Content: type <b>text/plain</b>, and insert the magic text <b>SMS message</b> ([sms_message]) as the body.</li>
+      <li>Save. Tap <b>Send a test</b> above, or wait for your next bank SMS.</li></ol></div>
+    <div class="card"><h3>iPhone · Shortcuts automation</h3><ol class="steps">
+      <li>Shortcuts → Automation → + → <b>Message</b>. Message contains <b>debited</b> (make more automations for <i>spent</i>, <i>credited</i>, <i>sent</i>). Choose <b>Run Immediately</b>.</li>
+      <li>New Blank Automation → add <b>Get Contents of URL</b> → paste the link above.</li>
+      <li>Tap the arrow: Method <b>POST</b>, Request Body <b>Form</b>, add a field named <b>text</b> and set its value to the <b>Shortcut Input</b> (the message).</li>
+      <li>Done. iPhone can't run this on messages already received; it works from the next one.</li></ol></div>
+    <p class="hint">Messages without an amount, OTPs and offers are thrown away by your sheet. If the link leaks, tap Reset link (this also resets timed-prompt links).</p>
+    <button class="btn block" data-reset="1">Reset link</button>`);
+  body.onclick = async ev => {
+    const hit = s => ev.target.closest(s);
+    const c = hit('[data-copy]'); if (c) { try { await navigator.clipboard.writeText(c.dataset.copy); toast('Link copied'); } catch { prompt('Copy this link', c.dataset.copy); } return; }
+    if (hit('[data-test]')) {
+      try { await fetch(url, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' }, body: `TEST: Rs.1.00 debited from A/c XX0000 to TANDEM TEST on ${today()}. Ref ${Date.now()}` }); } catch {}
+      toast('Test sent — it will appear in the inbox in a few seconds'); setTimeout(() => sync(true), 3500); return;
+    }
+    if (hit('[data-reset]') && confirm('The old link stops working; update MacroDroid / Shortcuts with the new one. Continue?')) { try { const r = await api('quickKey', { token: session.token, reset: true }); openSmsSetup(r.key); toast('Link reset'); } catch (e) { toast(e.message); } }
+  };
+}
 function openQuick(key) {
   const me = meId(), items = state.recurring.filter(r => !r.deleted && r.schedule === 'ask' && r.paidBy === me);
   const link = (r, act) => `${cfg.api}?quick=${encodeURIComponent(key)}&rid=${encodeURIComponent(r.id)}&do=${act}`;
@@ -1685,26 +2144,43 @@ function openQuick(key) {
 }
 
 function openAccount(a) {
-  const f = a ? { ...a } : { id: uid(), owner: meId(), name: '', upiApp: '' };
+  const f = a ? { ...a, apps: appsOf(a), dcs: dcardsOf(a).map(c => ({ ...c })) } : { id: uid(), owner: meId(), name: '', apps: [], dcs: [] };
   const body = openSheet(a ? 'Edit account' : 'Add bank account', '');
-  const collect = () => { f.name = $('#aNm', body).value; f.upiApp = $('#aUpi', body).value; };
+  let addApp = false;
+  const collect = () => { f.name = $('#aNm', body).value; f.last4 = $('#aL4', body).value.replace(/\D/g, '').slice(-4); $$('[data-dcn]', body).forEach(i => { const c = f.dcs[i.dataset.dcn]; if (c) c.name = i.value; }); $$('[data-dcl]', body).forEach(i => { const c = f.dcs[i.dataset.dcl]; if (c) c.last4 = i.value.replace(/\D/g, '').slice(-4); }); };
   const past = mode => spends().filter(e => e.paidBy === a.owner && e.mode === mode && !e.accountId);
   const draw = () => {
+    const shown = [...new Set([...f.apps, ...upiApps()])];
     body.innerHTML = `<label class="f"><span>Account name</span><input class="in" id="aNm" value="${esc(f.name)}" placeholder="e.g. HDFC Salary" maxlength="30"></label>
       <div class="fsec"><span class="flabel">Whose account</span><div class="seg">${['u1', 'u2'].map(id => `<button type="button" class="${f.owner === id ? 'on' : ''}" data-own="${id}">${esc(you(id))}</button>`).join('')}</div></div>
-      <label class="f"><span>UPI app used with it (optional)</span><input class="in" id="aUpi" value="${esc(f.upiApp)}" placeholder="e.g. GPay" maxlength="20" list="upiApps"><datalist id="upiApps">${UPI_APPS.map(n => `<option value="${n}">`).join('')}</datalist></label>
+      <label class="f"><span>Last 4 digits of the account number (optional)</span><input class="in" id="aL4" inputmode="numeric" maxlength="4" value="${esc(f.last4 || '')}" placeholder="e.g. 1234" style="max-width:160px"></label>
+      <p class="hint" style="margin:-6px 0 14px">Lets forwarded SMS like “A/c XX1234 debited” be matched to this account.</p>
+      <div class="fsec"><span class="flabel">UPI apps linked to it</span><div class="chips">${shown.map(n => chip(f.apps.includes(n), `data-upi="${esc(n)}"`, (f.apps.includes(n) ? '✓ ' : '') + esc(n) + (f.apps[0] === n && f.apps.length > 1 ? ' <small>· usual</small>' : ''))).join('')}<button type="button" class="chip ghost" data-addapp="1">＋ Add app</button></div>
+        ${addApp ? `<div class="catrow" style="grid-template-columns:1fr 70px;margin-top:8px"><input class="in" id="aApp" maxlength="20" placeholder="App name, e.g. Super.money" list="upiApps" autocomplete="off"><button type="button" class="btn" data-appok="1" style="padding:0">Add</button></div><datalist id="upiApps">${UPI_APPS.filter(n => !shown.includes(n)).map(n => `<option value="${n}">`).join('')}</datalist>` : ''}
+        <p class="hint" style="margin-top:4px">Tap every app this account is set up in. The first one you tick is the usual one.</p></div>
+      <div class="fsec"><span class="flabel">Debit cards</span>${f.dcs.map((c, i) => `<div class="catrow" style="grid-template-columns:1fr 84px 40px"><input class="in" data-dcn="${i}" value="${esc(c.name)}" placeholder="Card name, e.g. HDFC Visa" maxlength="24" aria-label="Card name"><input class="in" data-dcl="${i}" value="${esc(c.last4 || '')}" inputmode="numeric" maxlength="4" placeholder="Last 4" aria-label="Last 4 digits"><button type="button" class="x" data-dcdel="${i}" aria-label="Remove card">✕</button></div>`).join('')}
+        <div class="chips"><button type="button" class="chip ghost" data-dcadd="1">＋ Add debit card</button></div></div>
       <label class="f"><span>Balance right now (optional)</span><input class="in" id="aBal" inputmode="decimal" placeholder="${a && a.balance0At ? 'Type a new figure to correct it' : 'Type it to start tracking a balance'}"></label>
-      <div class="chips" style="margin:-6px 0 14px">${UPI_APPS.slice(0, 5).map(n => chip(f.upiApp === n, `data-upi="${n}"`, n)).join('')}</div>
-      <p class="hint" style="margin:0 0 14px">Only a name to recognise it by. Never enter account numbers or UPI PINs.</p>
+      <p class="hint" style="margin:0 0 14px">Only names to recognise things by, and at most the last 4 digits of a card. Never enter full account or card numbers, CVVs or UPI PINs.</p>
       <button class="btn primary block" data-save="1">Save account</button>${a ? `${(m => m.length ? `<div class="card" style="margin-top:14px"><h3>Earlier payments with no account</h3><p class="hint" style="margin:0 0 10px">Payments by ${esc(youL(a.owner))} logged before this account existed. Tap to file them under ${esc(a.name)}.</p><div class="chips">${m.map(([id, n]) => `<button type="button" class="chip" data-past="${id}">${esc(modeLabel(id))} · ${n}</button>`).join('')}</div></div>` : '')(ACCT_MODES.map(id => [id, past(id).length]).filter(x => x[1]))}<button class="btn danger block" data-del="1" style="margin-top:8px">Remove account</button>` : ''}`;
   };
+  const okApp = () => { const n = $('#aApp', body).value.trim().slice(0, 20); if (!n) return $('#aApp', body).focus(); collect(); const known = upiApps().find(x => x.toLowerCase() === n.toLowerCase()) || n;
+    if (!upiApps().includes(known)) setSetting('upiApps', [...(state.settings.upiApps || []), known]); if (!f.apps.includes(known)) f.apps.push(known); addApp = false; draw(); };
+  body.onkeydown = ev => { if (ev.key === 'Enter' && ev.target.id === 'aApp') { ev.preventDefault(); okApp(); } };
   body.onclick = ev => {
     const o = ev.target.closest('[data-own]'); if (o) { collect(); f.owner = o.dataset.own; return draw(); }
     const pm = ev.target.closest('[data-past]');
     if (pm) { const list = past(pm.dataset.past); if (!list.length || !confirm(`File ${list.length} earlier ${modeLabel(pm.dataset.past)} payment${list.length > 1 ? 's' : ''} under ${a.name}?`)) return;
-      list.forEach(e => mutate('Expenses', { ...e, accountId: a.id, upiApp: e.mode === 'upi' && !e.upiApp ? a.upiApp : e.upiApp }, true)); render(); toast(`${list.length} payment${list.length > 1 ? 's' : ''} filed under ${a.name}`); collect(); return draw(); }
-    const u = ev.target.closest('[data-upi]'); if (u) { collect(); f.upiApp = f.upiApp === u.dataset.upi ? '' : u.dataset.upi; return draw(); }
-    if (ev.target.closest('[data-save]')) { collect(); if (!f.name.trim()) return toast('Give the account a name'); const nb = $('#aBal', body).value.trim(); mutate('Accounts', { id: f.id, owner: f.owner, name: f.name.trim(), upiApp: f.upiApp.trim(), balance0: nb ? round2(calc(nb)) : f.balance0 || 0, balance0At: nb ? Date.now() : f.balance0At || 0, deleted: false }); closeSheet(); toast('Account saved'); }
+      const only = dcardsOf(a).length === 1 ? dcardsOf(a)[0].id : '';
+      list.forEach(e => mutate('Expenses', { ...e, accountId: a.id, upiApp: e.mode === 'upi' && !e.upiApp ? appsOf(a)[0] || '' : e.upiApp, debitCardId: e.mode === 'debit_card' && !e.debitCardId ? only : e.debitCardId || '' }, true)); render(); toast(`${list.length} payment${list.length > 1 ? 's' : ''} filed under ${a.name}`); collect(); return draw(); }
+    const u = ev.target.closest('[data-upi]'); if (u) { collect(); const n = u.dataset.upi; f.apps = f.apps.includes(n) ? f.apps.filter(x => x !== n) : [...f.apps, n]; return draw(); }
+    if (ev.target.closest('[data-addapp]')) { collect(); addApp = !addApp; draw(); if (addApp) $('#aApp', body).focus(); return; }
+    if (ev.target.closest('[data-appok]')) return okApp();
+    if (ev.target.closest('[data-dcadd]')) { collect(); f.dcs.push({ id: 'd' + uid(), name: '', last4: '' }); draw(); const ins = $$('[data-dcn]', body); ins[ins.length - 1].focus(); return; }
+    const dd = ev.target.closest('[data-dcdel]'); if (dd) { collect(); f.dcs.splice(Number(dd.dataset.dcdel), 1); return draw(); }
+    if (ev.target.closest('[data-save]')) { collect(); if (!f.name.trim()) return toast('Give the account a name'); const nb = $('#aBal', body).value.trim();
+      const dcs = f.dcs.filter(c => c.name.trim() || c.last4).map(c => ({ id: c.id, name: c.name.trim() || 'Debit card', last4: c.last4 || '' }));
+      mutate('Accounts', { id: f.id, owner: f.owner, name: f.name.trim(), last4: f.last4 || '', upiApp: f.apps.join(', '), debitCards: dcs, balance0: nb ? round2(calc(nb)) : f.balance0 || 0, balance0At: nb ? Date.now() : f.balance0At || 0, deleted: false }); closeSheet(); toast('Account saved'); }
     if (ev.target.closest('[data-del]') && confirm('Remove this account? Past entries stay.')) { mutate('Accounts', { ...a, deleted: true }); closeSheet(); }
   };
   draw();
@@ -1784,6 +2260,47 @@ const A = {
   month: el => { ui.month = addMonth(ui.month, Number(el.dataset.n)); render(); },
   basis: el => { ui.basis = el.dataset.b; render(); },
   editAcct: el => openAccount(liveAccts().find(a => a.id === el.dataset.id)),
+
+  inboxWho: el => { ui.inboxWho = el.dataset.v; render(); },
+  smsIgnore: el => { const m = state.inbox.find(x => x.id === el.dataset.id); if (m) { mutate('Inbox', { ...m, status: 'ignored' }); toast('Ignored', { label: 'Undo', fn: () => mutate('Inbox', { ...m, status: 'new' }) }); } },
+  smsUndo: el => { const m = state.inbox.find(x => x.id === el.dataset.id); if (m) mutate('Inbox', { ...m, status: 'new', expenseId: '' }); },
+  smsLink: el => { const m = state.inbox.find(x => x.id === el.dataset.id); if (m) { mutate('Inbox', { ...m, status: 'added', expenseId: el.dataset.e }); toast('Marked as already logged'); } },
+  smsAdd: el => {
+    const m = state.inbox.find(x => x.id === el.dataset.id); if (!m) return;
+    const g = smsGuess(m), p = g.p, done = id => { mutate('Inbox', { ...m, status: 'added', expenseId: id }, true); closeSheet(); render(); };
+    if (p.dir === 'in') return openIncome(null, { amount: String(p.amount), date: p.date, paidBy: g.paidBy, accountId: g.accountId, description: p.who, category: /refund|reversed/i.test(m.text) ? 'refund' : /salary/i.test(m.text) ? 'salary' : 'other_in', notes: 'From SMS' }, done);
+    if (p.mode === 'atm') return openTransfer(null, { amount: String(p.amount), date: p.date, paidBy: g.paidBy, category: 'cash', accountId: g.accountId, notes: 'From SMS' }, done);
+    const preset = { amount: String(p.amount), date: p.date, paidBy: g.paidBy, mode: g.mode, noAgain: true, notes: p.ref ? 'UPI ref ' + p.ref : '' };
+    ['cardId', 'accountId', 'debitCardId', 'upiApp', 'platform', 'category', 'description'].forEach(k => { if (g[k]) preset[k] = g[k]; });
+    openExpense(null, preset, done);
+  },
+  smsPaste() {
+    const body = openSheet('Paste a bank message', `<p class="hint" style="margin:0 0 10px">Copy a payment SMS or notification and paste it here. It's read the same way as forwarded ones.</p>
+      <textarea class="in" id="smsTxt" rows="5" placeholder="e.g. Rs.450.00 spent on HDFC Bank Card x4021 at SWIGGY on …"></textarea>
+      <button class="btn primary block" data-go="1" style="margin-top:10px">Read it</button>`);
+    body.onclick = ev => { if (!ev.target.closest('[data-go]')) return; const t = $('#smsTxt', body).value.trim(); const p = parseSms(t);
+      if (!p.amount) return toast('No amount found in that message');
+      const id = 'sms_' + meId() + '_' + uid(); mutate('Inbox', { id, owner: meId(), at: Date.now(), sender: 'pasted', text: t.slice(0, 1000), status: 'new', expenseId: '' }, true);
+      closeSheet(); go('inbox'); A.smsAdd({ dataset: { id } }); };
+    setTimeout(() => $('#smsTxt', body).focus(), 60);
+  },
+  async smsSetup() { if (cfg.demo) return toast('Not available in demo mode'); toast('Loading…'); try { const r = await api('quickKey', { token: session.token }); openSmsSetup(r.key); } catch (e) { toast(e.message); } },
+
+  trip: el => openTrip(el.dataset.id),
+  editTrip: el => openTripEdit(el && el.dataset && el.dataset.id ? tripOf(el.dataset.id) : null),
+  editGoal: el => openGoal(el && el.dataset && el.dataset.id ? goalsAll().find(g => g.id === el.dataset.id) : null),
+  goalAdd: el => goalMove(el.dataset.id, 1),
+  goalTake: el => goalMove(el.dataset.id, -1),
+
+  async lockOn() { const a = $('#lkP1').value, b = $('#lkP2').value; if (!/^\d{4,6}$/.test(a)) return toast('Use 4 to 6 digits'); if (a !== b) return toast("The two PINs don't match");
+    await setPin(a); render(); toast('App lock on'); if (await bioAvail()) setTimeout(() => toast('You can also turn on Face ID / fingerprint below'), 1800); },
+  lockAfter: el => { lockCfg = { ...lockCfg, after: Number(el.dataset.v) }; store.set(K.lock, lockCfg); render(); },
+  async lockBio() { try { await bioRegister(); render(); toast('Face ID / fingerprint on'); } catch (e) { toast(e && e.name === 'NotAllowedError' ? 'Cancelled' : 'Could not set it up on this device'); } },
+  lockBioOff: () => { lockCfg = { ...lockCfg, bio: '' }; store.set(K.lock, lockCfg); render(); },
+  async lockChange() { const o = prompt('Current PIN'); if (o == null) return; if ((await pinHash(o, lockCfg.salt)) !== lockCfg.hash) return toast('Wrong PIN');
+    const n = prompt('New PIN (4–6 digits)'); if (n == null) return; if (!/^\d{4,6}$/.test(n)) return toast('Use 4 to 6 digits'); await setPin(n); render(); toast('PIN changed'); },
+  async lockOff() { const o = prompt('Enter your PIN to turn off app lock'); if (o == null) return; if ((await pinHash(o, lockCfg.salt)) !== lockCfg.hash) return toast('Wrong PIN');
+    lockCfg = null; store.del(K.lock); render(); toast('App lock off'); },
   addIncome: () => openIncome(),
   editIncome: el => { const e = state.expenses.find(x => x.id === el.dataset.id); e && openIncome(e); },
   askAdd: el => doAsk(el.dataset.id, 'add'),
@@ -1796,7 +2313,8 @@ const A = {
   unmarkPaid: el => { const c = state.cards.find(x => x.id === el.dataset.id); if (!c) return; const i = cardInfo(c); mutate('BillPayments', { id: c.id + '_' + i.stmt, cardId: c.id, cycle: i.stmt, deleted: true }); },
   addPlat: () => { const n = (prompt('Platform name') || '').trim().slice(0, 24); if (n && !S.platforms.includes(n)) { setSetting('platforms', [...S.platforms, n]); render(); } },
   delPlat: el => { setSetting('platforms', S.platforms.filter(n => n !== el.dataset.n)); render(); },
-  addCat: () => { setSetting('categories', [...S.cats, { id: 'c' + uid(), name: 'New category', emoji: '🏷️' }]); render(); },
+  addCat: () => { const n = $('#ncName'), e = $('#ncEmoji'); if (!n.value.trim()) return n.focus(); const id = addCategory(n.value, e.value); render(); toast(cat(id).emoji + ' ' + cat(id).name + ' added'); },
+  restoreCat: el => { setSetting('categories', S.cats.map(c => c.id === el.dataset.id ? { ...c, archived: false } : c)); render(); },
   delCat: el => { if (S.activeCats.length <= 1) return; setSetting('categories', S.cats.map(c => c.id === el.dataset.id ? { ...c, archived: true } : c)); render(); },
   async saveProfile() {
     const name = $('#pName').value.trim(), email = $('#pEmail').value.trim();
@@ -1821,16 +2339,16 @@ const A = {
   switchUser() { session.userId = otherId(); store.set(K.session, session); render(); toast('Now using ' + uname(meId())); },
   logout() {
     if (queue.length && !confirm(`${queue.length} change(s) have not synced yet and will be lost. Sign out anyway?`)) return;
-    session = null; store.del(K.session); queue = []; saveQueue(); state = blank(); flushState(); meta = {}; store.set(K.meta, meta);
+    session = null; store.del(K.session); queue = []; saveQueue(); state = blank(); flushState(); meta = {}; store.set(K.meta, meta); lockCfg = null; store.del(K.lock);
     if (cfg.demo) { cfg = {}; store.set(K.cfg, cfg); }
     location.hash = ''; boot();
   },
   resetDevice() { if (!confirm('Remove all Tandem data from this device? Your Google Sheet is not touched.')) return; clearTimeout(saveT); Object.values(K).forEach(store.del); idb.del('state').catch(() => {}).then(() => { location.hash = ''; location.reload(); }); },
   install() { if (installEvt) { installEvt.prompt(); installEvt = null; } },
   exportCsv() {
-    const head = ['date', 'description', 'category', 'amount', 'paid_by', 'mode', 'card', 'account', 'upi_app', uname('u1') + '_share', uname('u2') + '_share', 'friends_share', 'friends', 'platform', 'ordered_from', 'category_split', 'added_by', 'type', 'settled', 'notes'];
+    const head = ['date', 'description', 'category', 'amount', 'paid_by', 'mode', 'card', 'account', 'upi_app', uname('u1') + '_share', uname('u2') + '_share', 'friends_share', 'friends', 'platform', 'ordered_from', 'category_split', 'added_by', 'type', 'settled', 'notes', 'trip', 'debit_card', 'receipt'];
     const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-    const rows = live().sort((a, b) => a.date.localeCompare(b.date)).map(e => [e.date, e.description, cat(e.category).name, e.amount, uname(e.paidBy), modeLabel(e.mode), (state.cards.find(c => c.id === e.cardId) || {}).name || '', ((state.accounts || []).find(c => c.id === e.accountId) || {}).name || '', e.upiApp || '', e.share1, e.share2, e.friendsShare || 0, (e.friends || []).map(p => friendName(p.id) + ' ' + p.amount + (p.settled ? ' (paid)' : '')).join('; '), e.platform || '', e.platform ? DEVICES[e.device] || DEVICES.primary : '', (e.cats || []).map(c => cat(c.id).name + ' ' + c.amount).join('; '), e.createdBy ? uname(e.createdBy) : '', e.type, e.settledBy ? 'yes' : '', e.notes].map(q).join(','));
+    const rows = live().sort((a, b) => a.date.localeCompare(b.date)).map(e => [e.date, e.description, cat(e.category).name, e.amount, uname(e.paidBy), modeLabel(e.mode), (state.cards.find(c => c.id === e.cardId) || {}).name || '', ((state.accounts || []).find(c => c.id === e.accountId) || {}).name || '', e.upiApp || '', e.share1, e.share2, e.friendsShare || 0, (e.friends || []).map(p => friendName(p.id) + ' ' + p.amount + (p.settled ? ' (paid)' : '')).join('; '), e.platform || '', e.platform ? DEVICES[e.device] || DEVICES.primary : '', (e.cats || []).map(c => cat(c.id).name + ' ' + c.amount).join('; '), e.createdBy ? uname(e.createdBy) : '', e.type, e.settledBy ? 'yes' : '', e.notes, (tripOf(e.trip) || {}).name || '', e.debitCardId && findDcard(e.debitCardId) ? dcardLabel(findDcard(e.debitCardId)) : '', e.receipt ? 'yes' : ''].map(q).join(','));
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['﻿' + head.map(q).join(',') + '\n' + rows.join('\n')], { type: 'text/csv' }));
     a.download = `tandem-expenses-${today()}.csv`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
@@ -1846,6 +2364,55 @@ document.addEventListener('input', ev => {
   if (t.id === 'q') { ui.filter.q = t.value; $('#explist').innerHTML = expList(); }
   if (t.id === 'splitR') { const v = Number(t.value); $('#splitA').textContent = `${uname('u1')} ${v}%`; $('#splitB').textContent = `${uname('u2')} ${100 - v}%`; }
 });
+/* every amount box is also a calculator: type 2345+7653 and it becomes 9998 before anything reads it */
+const isAmt = el => !!el && el.tagName === 'INPUT' && el.getAttribute('inputmode') === 'decimal' && !el.readOnly;
+const hasOp = v => /\d\s*[+\-*\/x×]\s*[\d.]/i.test(String(v || '').replace(/,/g, '').replace(/^\s*-/, ''));
+function settleAmt(el) {
+  if (!isAmt(el) || !hasOp(el.value)) return false;
+  const v = calc(el.value); el.value = String(v);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+}
+document.addEventListener('change', ev => settleAmt(ev.target), true);       // runs before any form reads the value
+document.addEventListener('keydown', ev => { if (!isAmt(ev.target)) return; if (ev.key === '=') { ev.preventDefault(); settleAmt(ev.target); placeCalc(); } else if (ev.key === 'Enter') { settleAmt(ev.target); placeCalc(); } }, true);
+let calcEl = null;
+const TOUCH = navigator.maxTouchPoints > 0 || 'ontouchstart' in window || matchMedia('(pointer: coarse)').matches;   // phones and tablets; a real keyboard already has + and −
+function placeCalc() {
+  const bar = $('#calcbar'), el = calcEl;
+  if (!bar) return;
+  if (!el || !document.body.contains(el) || document.activeElement !== el) { bar.hidden = true; return; }
+  if (!TOUCH) { bar.hidden = true; return; }
+  const vv = window.visualViewport, vh = vv ? vv.height + vv.offsetTop : innerHeight, r = el.getBoundingClientRect();
+  const pv = $('#calcPv', bar), show = hasOp(el.value) && el.id !== 'fAmt';
+  pv.textContent = show ? '= ' + money(calc(el.value)) : ''; pv.hidden = !show;
+  bar.hidden = false;      // sits just above the on-screen keyboard, at the right, like a keyboard toolbar
+  const h = bar.offsetHeight, w = bar.offsetWidth, vw = vv ? vv.width + vv.offsetLeft : innerWidth;
+  let top = vh - h - 8;
+  if (top < r.bottom + 4 && top + h > r.top) top = Math.max(4, r.top - h - 6);          // never on top of the field itself
+  bar.style.top = top + 'px'; bar.style.left = Math.max(8, vw - w - 8) + 'px';
+}
+document.addEventListener('focusin', ev => { if (isAmt(ev.target)) { calcEl = ev.target; placeCalc(); } });
+document.addEventListener('focusout', ev => { if (ev.target === calcEl) setTimeout(() => { if (document.activeElement !== calcEl) { calcEl = null; placeCalc(); } }, 0); });
+document.addEventListener('input', ev => { if (ev.target === calcEl) placeCalc(); });
+document.addEventListener('scroll', () => calcEl && placeCalc(), true);
+if (window.visualViewport) visualViewport.addEventListener('resize', () => calcEl && placeCalc());
+(() => {
+  const bar = document.createElement('div'); bar.id = 'calcbar'; bar.hidden = true; bar.setAttribute('role', 'toolbar'); bar.setAttribute('aria-label', 'Calculator');
+  bar.innerHTML = [['+', '+'], ['-', '−'], ['*', '×'], ['/', '÷']].map(([k, l]) => `<button type="button" data-op="${k}" aria-label="${{ '+': 'plus', '-': 'minus', '*': 'times', '/': 'divided by' }[k]}">${l}</button>`).join('') + '<button type="button" data-op="=" aria-label="equals">=</button><span id="calcPv"></span>';
+  bar.addEventListener('pointerdown', ev => ev.preventDefault());            // keep the keyboard up
+  bar.addEventListener('mousedown', ev => ev.preventDefault());
+  bar.addEventListener('click', ev => {
+    const b = ev.target.closest('[data-op]'), el = calcEl; if (!b || !el) return;
+    if (b.dataset.op === '=') { settleAmt(el); el.dispatchEvent(new Event('change', { bubbles: true })); }
+    else { const v = el.value, st = el.selectionStart ?? v.length, en = el.selectionEnd ?? v.length, op = b.dataset.op;
+      const before = v.slice(0, st).replace(/[+\-*\/×x]\s*$/, '');                // tapping + then − just swaps the sign
+      if (!before && op !== '-') return;
+      el.value = before + op + v.slice(en); const c = before.length + 1; try { el.setSelectionRange(c, c); } catch {}
+      el.dispatchEvent(new Event('input', { bubbles: true })); }
+    el.focus(); placeCalc();
+  });
+  document.body.appendChild(bar);
+})();
 document.addEventListener('change', ev => {
   const t = ev.target;
   if (t.dataset.f) { ui.filter[t.dataset.f] = t.value; $('#explist').innerHTML = expList(); }
@@ -1858,6 +2425,7 @@ document.addEventListener('change', ev => {
 });
 document.addEventListener('keydown', ev => {
   if (ev.key === 'Escape') return closeSheet();
+  if (ev.key === 'Enter' && /^nc(Name|Emoji)$/.test(ev.target.id || '')) { ev.preventDefault(); return A.addCat(); }
   if (!session || $('#sheet').innerHTML || /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName) || ev.ctrlKey || ev.metaKey || ev.altKey) return;
   if (ev.key === 'n') { ev.preventDefault(); openExpense(); }
   if (ev.key === '/') { ev.preventDefault(); go('expenses'); setTimeout(() => { const q = $('#q'); q && q.focus(); }, 50); }
@@ -1974,9 +2542,17 @@ function seedDemo() {
   }
   const old = state.expenses.filter(e => monthOf(e.date) < monthOf(today()));
   if (old.length) { old.forEach(e => (e.settledBy = 'ds1')); state.expenses.push({ id: 'ds1', type: 'settlement', date: dayOn(...today().split('-').map(Number).slice(0, 2), 1), amount: 1840, description: 'Settlement', category: '', paidBy: 'u2', mode: 'upi', cardId: '', splitType: '', share1: 0, share2: 0, notes: '', recurringId: '', settledBy: '', createdAt: Date.now(), deleted: false }); }
-  state.accounts = [{ id: 'a1', owner: 'u1', name: 'HDFC Salary', upiApp: 'GPay', deleted: false }, { id: 'a2', owner: 'u1', name: 'ICICI Savings', upiApp: 'PhonePe', deleted: false }, { id: 'a3', owner: 'u2', name: 'SBI', upiApp: 'Paytm', deleted: false }];
+  state.accounts = [{ id: 'a1', owner: 'u1', name: 'HDFC Salary', upiApp: 'GPay, CRED', debitCards: [{ id: 'dc1', name: 'HDFC Visa', last4: '4021' }], deleted: false }, { id: 'a2', owner: 'u1', name: 'ICICI Savings', upiApp: 'PhonePe, GPay', debitCards: [], deleted: false }, { id: 'a3', owner: 'u2', name: 'SBI', upiApp: 'Paytm', deleted: false }];
   state.expenses.push({ id: 'di1', type: 'income', date: dayOn(...today().split('-').map(Number).slice(0, 2), 1), amount: 85000, description: 'Salary', category: 'salary', paidBy: 'u1', mode: '', cardId: '', accountId: 'a1', splitType: '', share1: 0, share2: 0, notes: '', recurringId: '', settledBy: '', createdBy: 'u1', createdAt: Date.now(), deleted: false });
   state.recurring = [{ id: 'r2', description: 'Office lunch', amount: 150, category: 'dining', paidBy: 'u1', mode: 'upi', cardId: '', accountId: 'a1', splitType: 'personal', payerPct: 50, dayOfMonth: 1, active: true, deleted: false, schedule: 'ask', days: '0,1,2,3,4,5,6', askTime: '00:00', startDate: today() }, { id: 'r1', description: 'Rent', amount: 24000, category: 'rent', paidBy: 'u1', mode: 'netbanking', cardId: '', splitType: 'shared', payerPct: 50, dayOfMonth: 1, active: true, deleted: false }];
+  const t0 = addDays(today(), -9);
+  state.settings.trips = [{ id: 'tgoa', name: 'Goa trip', emoji: '🏖️', start: t0, end: addDays(t0, 3) }];
+  [['Beach shack lunch', 'dining', 1860, 'u1'], ['Scooter rental', 'transport', 1200, 'u2'], ['Hotel', 'travel', 9800, 'u1'], ['Seafood dinner', 'dining', 2650, 'u2']].forEach(([d, c, a, p], i) =>
+    state.expenses.push({ id: 'dt' + i, type: 'expense', date: addDays(t0, i % 4), amount: a, description: d, category: c, paidBy: p, mode: 'upi', cardId: '', splitType: 'shared', share1: a / 2, share2: a / 2, notes: '', trip: 'tgoa', createdAt: Date.now() - (9 - i) * 864e5, deleted: false }));
+  state.settings.goals = [{ id: 'g1', name: 'Emergency fund', emoji: '🛟', target: 200000, by: addDays(today(), 240), who: 'both', adds: [{ date: addDays(today(), -60), amount: 60000, by: 'u1', note: 'Already saved' }, { date: addDays(today(), -20), amount: 15000, by: 'u2', note: '' }] }];
+  state.cards[0].rewards = { base: 1, rules: [{ k: 'plat:Swiggy', pct: 10 }, { k: 'plat:Amazon', pct: 5 }] };
+  state.inbox = [{ id: 'sms1', owner: 'u1', at: Date.now() - 36e5, sender: 'AD-HDFCBK', text: `Rs.450.00 spent on HDFC Bank Card x4417 at SWIGGY on ${today()}. Avl Lmt: Rs.1,20,000`, status: 'new', expenseId: '' },
+    { id: 'sms2', owner: 'u1', at: Date.now() - 72e5, sender: 'AX-ICICIB', text: `Sent Rs.250.00 From HDFC Bank A/C x1234 To ZEPTO On ${today().slice(8)}/${today().slice(5, 7)}/${today().slice(2, 4)} Ref 432198765432`, status: 'new', expenseId: '' }];
   saveState();
 }
 
@@ -1990,6 +2566,7 @@ function route() {
 }
 function startApp() {
   route();
+  showLock();
   if (cfg.demo) { runRecurring(); render(); notifyCards(); } else sync();
 }
 function boot() {
@@ -2006,7 +2583,8 @@ function boot() {
 window.addEventListener('hashchange', route);
 window.addEventListener('online', () => { setStatus(); sync(); });
 window.addEventListener('offline', setStatus);
-document.addEventListener('visibilitychange', () => { if (document.hidden) { if (saveT) flushState(); return; } if (!session) return; tick(); if (Date.now() - lastSync > 30000) sync(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { if (saveT) flushState(); hiddenAt = Date.now(); if (lockCfg && Number(lockCfg.after) === 0) showLock(); return; } if (!session) return;
+  if (lockCfg && hiddenAt && Date.now() - hiddenAt >= Number(lockCfg.after || 0) * 6e4) showLock(); hiddenAt = 0; tick(); if (Date.now() - lastSync > 30000) sync(); });
 setInterval(tick, 60000);
 if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', ev => { const d = ev.data || {}; if (d.ask && session) { go('home'); if (d.action && d.action !== 'open') doAsk(d.ask, d.action); } });
 window.addEventListener('beforeinstallprompt', ev => { ev.preventDefault(); installEvt = ev; if (session && ui.view === 'more') render(); });

@@ -1,5 +1,5 @@
 /* Tandem service worker: makes the app open instantly and work offline. */
-const CACHE = 'tandem-v14';
+const CACHE = 'tandem-v18';
 const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
